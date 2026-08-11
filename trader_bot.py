@@ -4,33 +4,34 @@ import datetime
 import time
 import re
 import os
-import sys
 
 # ==========================================================
-# НАСТРОЙКИ (ВСТАВЬ СВОИ ДАННЫЕ)
+# НАСТРОЙКИ (КЛЮЧИ БЕРУТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ RENDER)
 # ==========================================================
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Твой ключ от OpenRouter
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") # Твой токен ТГ
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")  # Узнай через @userinfobot
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-MODEL = "deepseek/deepseek-v4-flash-0423"  # Быстрая, дешевая, знает русский
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"] # ТОП-5
+MODEL = "deepseek/deepseek-v4-flash-0423"
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 STATE_FILE = "trade_state.json"
 # ==========================================================
 
 # --- ПРОВЕРКА ВРЕМЕНИ (ЕКАТЕРИНБУРГ UTC+5) ---
 def is_working_hours():
-    now_utc = datetime.datetime.utcnow()
+    # Исправленный метод без предупреждений (DeprecationWarning)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
     return 14 <= hour_ekb < 24
 
-# --- ЗАПРОС ЦЕН С BYBIT ---
+# --- ЗАПРОС ЦЕН С BYBIT (с таймаутом и логами ошибок) ---
 def get_prices():
     prices = {}
     for sym in SYMBOLS:
         try:
             url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={sym}"
-            resp = requests.get(url).json()
+            # Добавили таймаут, чтобы не зависать, и теперь мы увидим ошибки в логах
+            resp = requests.get(url, timeout=10).json()
             if resp['retCode'] == 0:
                 tick = resp['result']['list'][0]
                 prices[sym] = {
@@ -38,7 +39,9 @@ def get_prices():
                     'change': float(tick['change24h']) if tick['change24h'] else 0.0,
                     'volume': float(tick['volume24h'])
                 }
-        except:
+        except Exception as e:
+            # Выводим ошибку прямо в логи Render-а
+            print(f"❌ Ошибка получения цены для {sym}: {e}")
             continue
     return prices
 
@@ -72,16 +75,16 @@ def ask_ai(prices, trade=None):
             return json.loads(match.group())
         return json.loads(raw)
     except Exception as e:
-        print(f"❌ Ошибка сети или парсинга: {e}")
+        print(f"❌ Ошибка сети или парсинга OpenRouter: {e}")
         return None
 
 # --- ОТПРАВКА В TELEGRAM ---
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": text})
-    except:
-        pass
+        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": text}, timeout=5)
+    except Exception as e:
+        print(f"❌ Ошибка отправки в Telegram: {e}")
 
 # --- ПАМЯТЬ СДЕЛОК ---
 def load_state():
@@ -101,13 +104,14 @@ def clear_state():
 # --- ГЛАВНЫЙ ЦИКЛ ---
 def main():
     print("⏰ Бот проснулся.")
+    
     if not is_working_hours():
         print("⏳ Вне рабочего времени (14:00-24:00 Екб). Завершаюсь.")
         return
 
     prices = get_prices()
     if not prices:
-        print("❌ Нет цен. Завершаюсь.")
+        print("❌ Нет цен. Проверь ошибки выше. Завершаюсь.")
         return
 
     trade = load_state()
