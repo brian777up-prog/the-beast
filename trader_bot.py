@@ -24,25 +24,30 @@ def is_working_hours():
     hour_ekb = (now_utc.hour + 5) % 24
     return 14 <= hour_ekb < 24
 
-# --- ЗАПРОС ЦЕН С BYBIT (с таймаутом и логами ошибок) ---
+# --- ЗАПРОС ЦЕН С BINANCE (публичный, БЕЗ КЛЮЧЕЙ) ---
 def get_prices():
     prices = {}
     for sym in SYMBOLS:
         try:
-            url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={sym}"
-            # Добавили таймаут, чтобы не зависать, и теперь мы увидим ошибки в логах
-            resp = requests.get(url, timeout=10).json()
-            if resp['retCode'] == 0:
-                tick = resp['result']['list'][0]
+            # Binance не принимает "USDT" в конце, поэтому отрезаем (BTCUSDT -> BTC)
+            base_sym = sym.replace("USDT", "")
+            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={base_sym}USDT"
+            # Обязательно добавляем User-Agent, чтобы нас не заблокировали как бота
+            headers = {"User-Agent": "Mozilla/5.0"}
+            
+            resp = requests.get(url, headers=headers, timeout=10)
+            
+            if resp.status_code == 200:
+                data = resp.json()
                 prices[sym] = {
-                    'price': float(tick['lastPrice']),
-                    'change': float(tick['change24h']) if tick['change24h'] else 0.0,
-                    'volume': float(tick['volume24h'])
+                    'price': float(data['lastPrice']),
+                    'change': float(data['priceChangePercent']),
+                    'volume': float(data['volume'])
                 }
+            else:
+                print(f"❌ Ошибка Binance {sym}: статус {resp.status_code}")
         except Exception as e:
-            # Выводим ошибку прямо в логи Render-а
-            print(f"❌ Ошибка получения цены для {sym}: {e}")
-            continue
+            print(f"❌ Ошибка получения цены для {sym} (Binance): {e}")
     return prices
 
 # --- ЗАПРОС К OPENROUTER (ИИ) ---
