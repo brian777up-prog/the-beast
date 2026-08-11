@@ -4,6 +4,7 @@ import datetime
 import time
 import re
 import os
+import threading
 from flask import Flask
 
 # ==========================================================
@@ -13,8 +14,13 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
+# Модель ИИ
 MODEL = "deepseek/deepseek-v4-flash"
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+
+# Проценты для Тейка и Стопа (можно менять через переменные окружения)
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", 4.0))   # по умолчанию 4%
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))       # по умолчанию 2%
+
 STATE_FILE = "trade_state.json"
 LAST_RUN_FILE = "last_run.txt"
 # ==========================================================
@@ -27,43 +33,55 @@ def is_working_hours():
     hour_ekb = (now_utc.hour + 5) % 24
     return 14 <= hour_ekb < 24
 
-# --- ЗАПРОС ЦЕН С MEXC (публичный, без ключей) ---
+# --- ДИНАМИЧЕСКИЙ ТОП-5 МОНЕТ ПО ОБЪЕМУ С MEXC ---
 def get_prices():
     prices = {}
-    for sym in SYMBOLS:
-        try:
-            url = f"https://api.mexc.com/api/v3/ticker/24hr?symbol={sym}"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            
-            resp = requests.get(url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
+    try:
+        url = "https://api.mexc.com/api/v3/ticker/24hr"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+
+        if resp.status_code == 200:
+            all_tickers = resp.json()
+            # Фильтруем только USDT пары
+            usdt_tickers = [t for t in all_tickers if t['symbol'].endswith('USDT')]
+            # Сортируем по объему (quoteVolume) по убыванию
+            usdt_tickers.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
+            # Берем топ-5
+            top5 = usdt_tickers[:5]
+
+            for ticker in top5:
+                sym = ticker['symbol']
                 prices[sym] = {
-                    'price': float(data['lastPrice']),
-                    'change': float(data['priceChangePercent']),
-                    'volume': float(data['quoteVolume'])
+                    'price': float(ticker['lastPrice']),
+                    'change': float(ticker['priceChangePercent']),
+                    'volume': float(ticker['quoteVolume'])
                 }
-            else:
-                print(f"⚠️ MEXC {sym}: статус {resp.status_code}")
-            time.sleep(0.8) # Защита от блокировки
-            
-        except Exception as e:
-            print(f"❌ Ошибка получения цены для {sym} (MEXC): {e}")
-            continue
+            print(f"✅ ТОП-5 по объему: {list(prices.keys())}")
+        else:
+            print(f"⚠️ MEXC: статус {resp.status_code}")
+    except Exception as e:
+        print(f"❌ Ошибка получения топ-5 монет: {e}")
+
     return prices
 
 # --- ЗАПРОС К OPENROUTER (ИИ) ---
 def ask_ai(prices, trade=None):
-    prompt = f"Ты трейдер. Вот ТОП-5 монет за 24ч:\n"
+    # Формируем промпт с жесткими процентами
+    prompt = f"Ты трейдер. Вот ТОП-5 монет за 24ч по объему:\n"
     for sym, d in prices.items():
         prompt += f"{sym}: {d['price']} (изм. {d['change']}%) объем {d['volume']}\n"
-    
+
     if trade:
         prompt += f"\nУ меня открыта сделка: {trade['symbol']} по {trade['entry_price']}. Что делать с ней? Ждать/закрыть?"
 
-    prompt += """
-Дай 1 лучший сигнал (действие: LONG / SHORT / CLOSE / HOLD). Ответь строго JSON:
-{"symbol": "X", "action": "X", "entry_price": X, "take_profit": X, "stop_loss": X, "reason": "X"}"""
+    # Жесткое требование по процентам
+    prompt += f"""
+Дай 1 лучший сигнал (действие: LONG / SHORT / CLOSE / HOLD).
+Тейк-профит рассчитывай строго как +{TAKE_PROFIT_PCT}% от цены входа.
+Стоп-лосс рассчитывай строго как -{STOP_LOSS_PCT}% от цены входа.
+Ответь строго JSON:
+{{"symbol": "X", "action": "X", "entry_price": X, "take_profit": X, "stop_loss": X, "reason": "X"}}"""
 
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {
@@ -110,7 +128,7 @@ def clear_state():
 
 # --- ГЛАВНЫЙ ЦИКЛ (ОСНОВНАЯ ЛОГИКА) ---
 def main_cycle():
-    # Проверяем, не прошло ли меньше 2 часов с последнего запуска (чтобы не спамить)
+    # Проверяем, не прошло ли меньше 2 часов с последнего запуска
     if os.path.exists(LAST_RUN_FILE):
         try:
             with open(LAST_RUN_FILE, 'r') as f:
@@ -120,12 +138,13 @@ def main_cycle():
                 return
         except:
             pass
-    
-    print("⏰ Начинаю 2-часовой анализ...")
+
+    # Проверяем рабочее время
     if not is_working_hours():
         print("⏳ Вне рабочего времени (14:00-24:00 Екб). Завершаюсь.")
         return
 
+    print("⏰ Запускаю анализ...")
     prices = get_prices()
     if not prices:
         print("❌ Нет цен. Завершаюсь.")
@@ -155,14 +174,34 @@ def main_cycle():
     with open(LAST_RUN_FILE, 'w') as f:
         f.write(str(int(time.time())))
 
-# --- ОБРАБОТЧИК ЗАПРОСОВ (ДЛЯ CRON-JOB) ---
+# --- ВСТРОЕННЫЙ БУДИЛЬНИК (ФОНОВЫЙ ПОТОК) ---
+def bg_alarm():
+    while True:
+        try:
+            if is_working_hours():
+                print("🔔 Рабочее время. Проверяю, не пора ли делать анализ...")
+                main_cycle()
+                time.sleep(1800)  # 30 минут
+            else:
+                print("🌙 Ночь или вне рабочего диапазона. Сплю 1 час...")
+                time.sleep(3600)  # 1 час
+        except Exception as e:
+            print(f"⚠️ Ошибка в фоновом будильнике: {e}")
+            time.sleep(300)
+
+# --- ОБРАБОТЧИК ЗАПРОСОВ (ДЛЯ RENDER И ПРОВЕРКИ ЖИВУЧЕСТИ) ---
 @app.route('/')
 def handler():
-    # Мгновенно возвращаем ответ, чтобы крон получил 200 ОК за 1 миллисекунду.
-    # Бот не будет делать никаких тяжелых вычислений здесь.
+    # Мгновенный ответ, чтобы тайм-аутов не было
     return "OK", 200
 
-# --- ЗАПУСК ВЕБ-СЕРВЕРА ---
+# --- ЗАПУСК ВЕБ-СЕРВЕРА И ФОНОВОГО БУДИЛЬНИКА ---
 if __name__ == "__main__":
+    # Запускаем будильник в отдельном потоке
+    alarm_thread = threading.Thread(target=bg_alarm)
+    alarm_thread.daemon = True
+    alarm_thread.start()
+
+    # Запускаем Flask-сервер
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
