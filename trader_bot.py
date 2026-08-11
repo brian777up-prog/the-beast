@@ -4,6 +4,7 @@ import datetime
 import time
 import re
 import os
+from flask import Flask
 
 # ==========================================================
 # НАСТРОЙКИ (КЛЮЧИ БЕРУТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ RENDER)
@@ -15,7 +16,10 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 MODEL = "deepseek/deepseek-v4-flash"
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 STATE_FILE = "trade_state.json"
+LAST_RUN_FILE = "last_run.txt"
 # ==========================================================
+
+app = Flask(__name__)
 
 # --- ПРОВЕРКА ВРЕМЕНИ (ЕКАТЕРИНБУРГ UTC+5) ---
 def is_working_hours():
@@ -23,7 +27,7 @@ def is_working_hours():
     hour_ekb = (now_utc.hour + 5) % 24
     return 14 <= hour_ekb < 24
 
-# --- ЗАПРОС ЦЕН С MEXC (публичный, без ключей, стабильный) ---
+# --- ЗАПРОС ЦЕН С MEXC (публичный, без ключей) ---
 def get_prices():
     prices = {}
     for sym in SYMBOLS:
@@ -41,9 +45,7 @@ def get_prices():
                 }
             else:
                 print(f"⚠️ MEXC {sym}: статус {resp.status_code}")
-            
-            # Небольшая задержка, чтобы биржа точно нас не заблокировала
-            time.sleep(0.8)
+            time.sleep(0.8) # Защита от блокировки
             
         except Exception as e:
             print(f"❌ Ошибка получения цены для {sym} (MEXC): {e}")
@@ -106,17 +108,27 @@ def clear_state():
     if os.path.exists(STATE_FILE):
         os.remove(STATE_FILE)
 
-# --- ГЛАВНЫЙ ЦИКЛ ---
-def main():
-    print("⏰ Бот проснулся.")
+# --- ГЛАВНЫЙ ЦИКЛ (ОСНОВНАЯ ЛОГИКА) ---
+def main_cycle():
+    # Проверяем, не прошло ли меньше 2 часов с последнего запуска (чтобы не спамить)
+    if os.path.exists(LAST_RUN_FILE):
+        try:
+            with open(LAST_RUN_FILE, 'r') as f:
+                last_run = int(f.read().strip())
+            if time.time() - last_run < 7200: # 7200 секунд = 2 часа
+                print("⏳ Прошло меньше 2 часов. Пропускаю цикл.")
+                return
+        except:
+            pass
     
+    print("⏰ Начинаю 2-часовой анализ...")
     if not is_working_hours():
         print("⏳ Вне рабочего времени (14:00-24:00 Екб). Завершаюсь.")
         return
 
     prices = get_prices()
     if not prices:
-        print("❌ Нет цен. Проверь ошибки выше. Завершаюсь.")
+        print("❌ Нет цен. Завершаюсь.")
         return
 
     trade = load_state()
@@ -125,7 +137,6 @@ def main():
         print("❌ Нет сигнала от ИИ.")
         return
 
-    # Формируем сообщение
     msg = f"📊 {signal.get('action')} {signal.get('symbol')}\n"
     if signal.get('entry_price'): msg += f"🟢 Вход: {signal['entry_price']}\n"
     if signal.get('take_profit'): msg += f"🎯 Тейк: {signal['take_profit']}\n"
@@ -135,11 +146,23 @@ def main():
     send_telegram(msg)
     print(f"✅ Отправлено: {msg}")
 
-    # Обновляем состояние
     if signal['action'] in ["LONG", "SHORT"]:
         save_state({"symbol": signal['symbol'], "entry_price": signal['entry_price']})
     elif signal['action'] == "CLOSE":
         clear_state()
 
+    # Записываем время успешного запуска
+    with open(LAST_RUN_FILE, 'w') as f:
+        f.write(str(int(time.time())))
+
+# --- ОБРАБОТЧИК ЗАПРОСОВ (ДЛЯ CRON-JOB) ---
+@app.route('/')
+def handler():
+    print(f"⏰ Запрос от будильника в {datetime.datetime.now()}")
+    main_cycle()
+    return "OK", 200
+
+# --- ЗАПУСК ВЕБ-СЕРВЕРА ---
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
