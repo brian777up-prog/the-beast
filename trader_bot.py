@@ -19,35 +19,46 @@ STATE_FILE = "trade_state.json"
 
 # --- ПРОВЕРКА ВРЕМЕНИ (ЕКАТЕРИНБУРГ UTC+5) ---
 def is_working_hours():
-    # Исправленный метод без предупреждений (DeprecationWarning)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
     return 14 <= hour_ekb < 24
 
-# --- ЗАПРОС ЦЕН С BINANCE (публичный, БЕЗ КЛЮЧЕЙ) ---
+# --- ЗАПРОС ЦЕН С COINGECKO (БЕЗ КЛЮЧЕЙ, РАБОТАЕТ НА RENDER) ---
 def get_prices():
+    # CoinGecko использует свои внутренние ID для монет
+    COINGECKO_IDS = {
+        "BTCUSDT": "bitcoin",
+        "ETHUSDT": "ethereum",
+        "SOLUSDT": "solana",
+        "XRPUSDT": "ripple",
+        "DOGEUSDT": "dogecoin"
+    }
+    
     prices = {}
-    for sym in SYMBOLS:
-        try:
-            # Binance не принимает "USDT" в конце, поэтому отрезаем (BTCUSDT -> BTC)
-            base_sym = sym.replace("USDT", "")
-            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={base_sym}USDT"
-            # Обязательно добавляем User-Agent, чтобы нас не заблокировали как бота
-            headers = {"User-Agent": "Mozilla/5.0"}
-            
-            resp = requests.get(url, headers=headers, timeout=10)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                prices[sym] = {
-                    'price': float(data['lastPrice']),
-                    'change': float(data['priceChangePercent']),
-                    'volume': float(data['volume'])
-                }
-            else:
-                print(f"❌ Ошибка Binance {sym}: статус {resp.status_code}")
-        except Exception as e:
-            print(f"❌ Ошибка получения цены для {sym} (Binance): {e}")
+    ids_string = ",".join(COINGECKO_IDS.values())
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_string}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true"
+    
+    try:
+        # Добавляем User-Agent для надёжности
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            for sym, cg_id in COINGECKO_IDS.items():
+                if cg_id in data:
+                    prices[sym] = {
+                        'price': float(data[cg_id]['usd']),
+                        'change': float(data[cg_id]['usd_24h_change']),
+                        'volume': float(data[cg_id]['usd_24h_vol'])
+                    }
+                else:
+                    print(f"❌ Монета {sym} не найдена в CoinGecko")
+        else:
+            print(f"❌ Ошибка CoinGecko: статус {resp.status_code}")
+    except Exception as e:
+        print(f"❌ Ошибка получения цен с CoinGecko: {e}")
+    
     return prices
 
 # --- ЗАПРОС К OPENROUTER (ИИ) ---
