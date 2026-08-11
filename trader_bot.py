@@ -23,42 +23,32 @@ def is_working_hours():
     hour_ekb = (now_utc.hour + 5) % 24
     return 14 <= hour_ekb < 24
 
-# --- ЗАПРОС ЦЕН С COINGECKO (БЕЗ КЛЮЧЕЙ, РАБОТАЕТ НА RENDER) ---
+# --- ЗАПРОС ЦЕН С BINANCE (с задержкой, чтобы не было 451) ---
 def get_prices():
-    # CoinGecko использует свои внутренние ID для монет
-    COINGECKO_IDS = {
-        "BTCUSDT": "bitcoin",
-        "ETHUSDT": "ethereum",
-        "SOLUSDT": "solana",
-        "XRPUSDT": "ripple",
-        "DOGEUSDT": "dogecoin"
-    }
-    
     prices = {}
-    ids_string = ",".join(COINGECKO_IDS.values())
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_string}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true"
-    
-    try:
-        # Добавляем User-Agent для надёжности
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            for sym, cg_id in COINGECKO_IDS.items():
-                if cg_id in data:
-                    prices[sym] = {
-                        'price': float(data[cg_id]['usd']),
-                        'change': float(data[cg_id]['usd_24h_change']),
-                        'volume': float(data[cg_id]['usd_24h_vol'])
-                    }
-                else:
-                    print(f"❌ Монета {sym} не найдена в CoinGecko")
-        else:
-            print(f"❌ Ошибка CoinGecko: статус {resp.status_code}")
-    except Exception as e:
-        print(f"❌ Ошибка получения цен с CoinGecko: {e}")
-    
+    for sym in SYMBOLS:
+        try:
+            base_sym = sym.replace("USDT", "")
+            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={base_sym}USDT"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                prices[sym] = {
+                    'price': float(data['lastPrice']),
+                    'change': float(data['priceChangePercent']),
+                    'volume': float(data['volume'])
+                }
+            else:
+                print(f"⚠️ Binance {sym}: статус {resp.status_code}")
+            
+            # ВАЖНО: Задержка 1 секунда, чтобы не заблокировали IP!
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"❌ Ошибка получения цены для {sym} (Binance): {e}")
+            continue
     return prices
 
 # --- ЗАПРОС К OPENROUTER (ИИ) ---
