@@ -23,47 +23,31 @@ def is_working_hours():
     hour_ekb = (now_utc.hour + 5) % 24
     return 14 <= hour_ekb < 24
 
-# --- ЗАПРОС ЦЕН С OKX (ОДИН ЗАПРОС НА 5 МОНЕТ, БЕЗ БЛОКИРОВОК) ---
+# --- ЗАПРОС ЦЕН С MEXC (публичный, без ключей, стабильный) ---
 def get_prices():
     prices = {}
-    # OKX использует тире вместо USDT в конце (BTC-USDT)
-    OKX_MAP = {
-        "BTCUSDT": "BTC-USDT",
-        "ETHUSDT": "ETH-USDT",
-        "SOLUSDT": "SOL-USDT",
-        "XRPUSDT": "XRP-USDT",
-        "DOGEUSDT": "DOGE-USDT"
-    }
-    
-    url = "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
-    
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            if data['code'] == '0':
-                # Перебираем все монеты, которые вернула биржа
-                for ticker in data['data']:
-                    inst_id = ticker['instId']
-                    # Если это одна из наших 5 монет
-                    if inst_id in OKX_MAP.values():
-                        # Находим оригинальное название (BTCUSDT)
-                        for sym, okx_id in OKX_MAP.items():
-                            if okx_id == inst_id:
-                                prices[sym] = {
-                                    'price': float(ticker['last']),
-                                    'change': float(ticker['24hPct']),
-                                    'volume': float(ticker['vol24h'])
-                                }
+    for sym in SYMBOLS:
+        try:
+            url = f"https://api.mexc.com/api/v3/ticker/24hr?symbol={sym}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                prices[sym] = {
+                    'price': float(data['lastPrice']),
+                    'change': float(data['priceChangePercent']),
+                    'volume': float(data['quoteVolume'])
+                }
             else:
-                print(f"⚠️ Ошибка OKX: код {data['code']}")
-        else:
-            print(f"⚠️ Ошибка OKX: статус {resp.status_code}")
-    except Exception as e:
-        print(f"❌ Ошибка получения цен с OKX: {e}")
-    
+                print(f"⚠️ MEXC {sym}: статус {resp.status_code}")
+            
+            # Небольшая задержка, чтобы биржа точно нас не заблокировала
+            time.sleep(0.8)
+            
+        except Exception as e:
+            print(f"❌ Ошибка получения цены для {sym} (MEXC): {e}")
+            continue
     return prices
 
 # --- ЗАПРОС К OPENROUTER (ИИ) ---
