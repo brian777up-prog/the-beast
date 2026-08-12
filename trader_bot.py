@@ -14,7 +14,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# МОДЕЛЬ (Llama 3.3 70B - главная)
+# МОДЕЛЬ (Llama 3.3 70B)
 MODEL = "meta-llama/llama-3.3-70b-instruct"
 
 # Проценты для базового режима
@@ -23,6 +23,7 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
 STATE_FILE = "trade_state.json"
 LAST_RUN_FILE = "last_run.txt"
+DUMP_STATE_FILE = "dump_state.json"  # Память для ловца дампов
 # ==========================================================
 
 app = Flask(__name__)
@@ -89,10 +90,10 @@ def get_top_n_prices_from_mexc(n=30):
 
     return prices
 
-# --- ЗАПРОС 15-МИНУТНЫХ СВЕЧЕЙ С MEXC ---
-def get_15m_candle(symbol):
+# --- ЗАПРОС 15-МИНУТНЫХ СВЕЧЕЙ (24 ШТУКИ = 6 ЧАСОВ) ---
+def get_15m_candles(symbol):
     try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=6"
+        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=24"
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -100,6 +101,7 @@ def get_15m_candle(symbol):
             candles = []
             for candle in data:
                 candles.append({
+                    'open': float(candle[1]),
                     'close': float(candle[4]),
                     'volume': float(candle[5])
                 })
@@ -180,71 +182,103 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ДАМПОВ 2.0 (НЕЙРОСЕТЬ ГЛАВНАЯ, МАТЕМАТИКА - ПОДСКАЗЧИК)
+# ЛОВЕЦ ДАМПОВ 2.0 (3-ЧАСОВОЙ ПАМП + 0.5% РАЗВОРОТ + КРАСНАЯ СВЕЧА)
 # ==========================================================
 def check_pump_dump_ai():
     if not is_working_hours():
         return
 
-    print("🎯 Сканер (15 мин): ищу аномалии в ТОП-30...")
+    print("🎯 Мгновенный сканер (15 мин): ищу 3-часовой памп в ТОП-30...")
     prices = get_top_n_prices_from_mexc(30)
-    if not prices: return
+    if not prices:
+        return
+
+    dump_state = load_state(DUMP_STATE_FILE)
+    new_dump_state = {}
 
     for sym in prices.keys():
-        candles = get_15m_candle(sym)
-        if not candles or len(candles) < 3:
+        candles = get_15m_candles(sym)
+        if not candles or len(candles) < 24:
             continue
 
-        last = candles[-1]
-        prev = candles[-2]
-        # Средний объем за 3 последние свечи (45 минут)
-        avg_volume = sum(c['volume'] for c in candles[-3:]) / 3
+        # Первые 12 свечей (3 часа) — базовый объем
+        base_vol = sum(c['volume'] for c in candles[:12]) / 12
+        # Последние 12 свечей (3 часа) — текущий объем
+        recent_vol = sum(c['volume'] for c in candles[12:])
+        vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
 
-        # МАТЕМАТИКА-ПОДСКАЗЧИК: ищем резкий всплеск (за 15 мин)
-        if avg_volume == 0: continue
-        change = (last['close'] - prev['close']) / prev['close']
-        vol_ratio = last['volume'] / avg_volume
+        # Цена 3 часа назад и сейчас
+        price_3h_ago = candles[12]['close']
+        current_price = candles[-1]['close']
+        change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # Если цена выросла > 3.5% И объем > среднего в 2.2 раза
-        if change >= 0.035 and vol_ratio >= 2.2:
-            print(f"⚡ Аномалия по {sym}! Отправляю в Llama 3.3...")
-            
-            # НЕЙРОСЕТЬ ГЛАВНАЯ: формируем запрос к Llama 3.3
-            prompt = f"""
-Ты трейдер-аналитик. Обнаружена аномалия по монете {sym}.
-За 15 минут цена выросла на {change*100:.1f}%.
-Объём в {vol_ratio:.1f} раз выше среднего за последние 45 минут.
-Проанализируй: это реальный памп (за которым последует дамп) или ложное движение?
-Если это реальный памп, дай подтверждение на SHORT.
-Если НЕТ — отмени сигнал.
-Ответь строго JSON:
-{{"confirm": true/false, "reason": "..."}}
-"""
-            headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
-            data = {"model": MODEL, "messages": [{"role": "user", "content": prompt}]}
-            
-            try:
-                resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
-                result = resp.json()
-                if "error" in result: continue
-                raw = result['choices'][0]['message']['content']
-                match = re.search(r'\{.*\}', raw, re.DOTALL)
-                decision = json.loads(match.group()) if match else json.loads(raw)
+        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ПАМПА (рост ≥2% и объем ≥120% за 3 часа) ---
+        if sym not in dump_state:
+            if change_3h >= 0.02 and vol_ratio >= 2.2:
+                print(f"⚡ Обнаружен 3-часовой памп по {sym}! Ставлю метку.")
+                new_dump_state[sym] = {
+                    'detected': True,
+                    'peak_price': current_price,
+                    'pump_start_price': price_3h_ago
+                }
+
+        # --- ЭТАП 2: ОБНАРУЖЕНИЕ РАЗВОРОТА (падение 0.5% от пика + красная свеча) ---
+        elif sym in dump_state and dump_state[sym].get('detected'):
+            entry = dump_state[sym]
+            peak = entry['peak_price']
+            drop_percent = (current_price - peak) / peak
+            is_red_candle = candles[-1]['close'] < candles[-1]['open']
+
+            if drop_percent <= -0.005 and is_red_candle:
+                print(f"🎯 Разворот по {sym}! Падение 0.5% от пика, свеча красная. Бужу Llama...")
                 
-                if decision.get('confirm') is True:
-                    entry_price = last['close']
-                    take_profit = entry_price * 0.90
-                    stop_loss = entry_price * 1.05
+                prompt = f"""
+Ты трейдер. За 3 часа по {sym}:
+- Цена выросла на {change_3h*100:.1f}%
+- Объем вырос в {vol_ratio:.1f} раз.
+Цена достигла пика {peak}, упала на 0.5% и свеча красная.
+Это реальный дамп? Если да, подтверди SHORT.
+Дай Тейк в диапазоне от -2% до -12%.
+Дай Стоп в диапазоне от +1% до +6%.
+Ответь строго JSON:
+{{"confirm": true/false, "reason": "...", "tp_percent": float, "sl_percent": float}}
+"""
+                headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+                data = {"model": MODEL, "messages": [{"role": "user", "content": prompt}]}
+                
+                try:
+                    resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
+                    result = resp.json()
+                    if "error" in result:
+                        continue
+                    raw = result['choices'][0]['message']['content']
+                    match = re.search(r'\{.*\}', raw, re.DOTALL)
+                    decision = json.loads(match.group()) if match else json.loads(raw)
                     
-                    msg = f"🎯 ЛОВЕЦ ДАМПОВ (ИИ): SHORT {sym}\n"
-                    msg += f"🟢 Вход: {entry_price:.4f}\n"
-                    msg += f"🎯 Тейк (-10%): {take_profit:.4f}\n"
-                    msg += f"⛔ Стоп (+5%): {stop_loss:.4f}\n"
-                    msg += f"💬 Причина: {decision.get('reason')}"
-                    send_telegram(msg)
-                    print(f"✅ Llama подтвердила дамп по {sym}! Сигнал отправлен.")
-            except:
-                pass
+                    if decision.get('confirm') is True:
+                        entry_price = peak
+                        tp_percent = decision.get('tp_percent', -10.0)
+                        sl_percent = decision.get('sl_percent', 5.0)
+                        
+                        # Жесткие ограничения
+                        tp_percent = max(-12.0, min(-2.0, tp_percent))
+                        sl_percent = max(1.0, min(6.0, sl_percent))
+
+                        msg = f"🎯 ЛОВЕЦ ДАМПОВ (ИИ): SHORT {sym}\n"
+                        msg += f"🟢 Вход (пик): {entry_price:.4f}\n"
+                        msg += f"🎯 Тейк ({tp_percent:.1f}%): {entry_price * (1 + tp_percent/100):.4f}\n"
+                        msg += f"⛔ Стоп (+{sl_percent:.1f}%): {entry_price * (1 + sl_percent/100):.4f}\n"
+                        msg += f"💬 Причина: {decision.get('reason')}"
+                        send_telegram(msg)
+                        print(f"✅ Llama подтвердила дамп по {sym}. Сигнал отправлен!")
+                        continue  # убираем метку
+                except Exception as e:
+                    print(f"❌ Ошибка Llama по {sym}: {e}")
+            else:
+                # Если разворота еще нет, переносим метку
+                new_dump_state[sym] = entry
+
+    save_state(DUMP_STATE_FILE, new_dump_state)
 
 # --- ФОНОВЫЙ ПОТОК (УПРАВЛЕНИЕ РАСПИСАНИЕМ) ---
 def bg_alarm():
@@ -260,13 +294,14 @@ def bg_alarm():
                 main_cycle()
                 last_main_check = now
 
-            # Сканер дампа (строго каждые 15 минут)
+            # Ловец дампов (каждые 15 минут)
             if now - last_dump_check >= 900:
                 check_pump_dump_ai()
                 last_dump_check = now
 
             time.sleep(30)
         except Exception as e:
+            print(f"⚠️ Ошибка фонового потока: {e}")
             time.sleep(300)
 
 # --- ОБРАБОТЧИК ЗАПРОСОВ (ДЛЯ RENDER) ---
