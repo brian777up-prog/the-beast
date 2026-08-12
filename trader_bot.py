@@ -14,7 +14,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# МОДЕЛЬ (Llama 3.3 70B для базового сигнала)
+# МОДЕЛЬ (Llama 3.3 70B - главная)
 MODEL = "meta-llama/llama-3.3-70b-instruct"
 
 # Проценты для базового режима
@@ -23,7 +23,6 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
 STATE_FILE = "trade_state.json"
 LAST_RUN_FILE = "last_run.txt"
-DUMP_STATE_FILE = "dump_state.json"  # Память для ловца дампов
 # ==========================================================
 
 app = Flask(__name__)
@@ -90,15 +89,14 @@ def get_top_n_prices_from_mexc(n=30):
 
     return prices
 
-# --- ЗАПРОС 15-МИНУТНЫХ СВЕЧЕЙ С MEXC (для Ловца дампов) ---
+# --- ЗАПРОС 15-МИНУТНЫХ СВЕЧЕЙ С MEXC ---
 def get_15m_candle(symbol):
     try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=5"
+        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=6"
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            # Возвращаем последние 5 свечей: [open, high, low, close, volume]
             candles = []
             for candle in data:
                 candles.append({
@@ -107,10 +105,8 @@ def get_15m_candle(symbol):
                 })
             return candles
         else:
-            print(f"⚠️ Ошибка свечей {symbol}: {resp.status_code}")
             return None
     except Exception as e:
-        print(f"❌ Ошибка получения свечей {symbol}: {e}")
         return None
 
 # --- ОТПРАВКА В TELEGRAM ---
@@ -119,10 +115,10 @@ def send_telegram(text):
     try:
         requests.post(url, data={"chat_id": TG_CHAT_ID, "text": text}, timeout=5)
     except Exception as e:
-        print(f"❌ Ошибка отправки в Telegram: {e}")
+        pass
 
 # ==========================================================
-# БАЗОВЫЙ ЦИКЛ (2 ЧАСА, Llama 3.3)
+# БАЗОВЫЙ ЦИКЛ (2 ЧАСА)
 # ==========================================================
 def main_cycle():
     if os.path.exists(LAST_RUN_FILE):
@@ -140,15 +136,13 @@ def main_cycle():
         return
 
     print("⏰ Запускаю базовый цикл...")
-    prices = get_top_n_prices_from_mexc(5) # Для базы берем ТОП-5
+    prices = get_top_n_prices_from_mexc(5)
     if not prices:
-        print("❌ Нет цен. Завершаюсь.")
         return
 
     trade = load_state(STATE_FILE)
     
-    # Промпт для Llama 3.3 (жестко 1 сигнал)
-    prompt = f"Ты трейдер. ТОП-5 монет:\n"
+    prompt = f"Ты трейдер. ТОП-5 монет за 24ч:\n"
     for sym, d in prices.items():
         prompt += f"{sym}: {d['price']} (изм. {d['change_24h']}%) объём {d['volume_24h']}\n"
     if trade:
@@ -164,15 +158,10 @@ def main_cycle():
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
         result = resp.json()
-        if "error" in result:
-            print(f"❌ Ошибка OpenRouter: {result['error']}")
-            return
+        if "error" in result: return
         raw = result['choices'][0]['message']['content']
         match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if match:
-            signal = json.loads(match.group())
-        else:
-            signal = json.loads(raw)
+        signal = json.loads(match.group()) if match else json.loads(raw)
         
         msg = f"📊 БАЗОВЫЙ: {signal.get('action')} {signal.get('symbol')}\n"
         if signal.get('entry_price'): msg += f"🟢 Вход: {signal['entry_price']}\n"
@@ -180,7 +169,6 @@ def main_cycle():
         if signal.get('stop_loss'): msg += f"⛔ Стоп: {signal['stop_loss']}\n"
         msg += f"💬 Причина: {signal.get('reason')}"
         send_telegram(msg)
-        print(f"✅ Базовый сигнал отправлен")
 
         if signal['action'] in ["LONG", "SHORT"]:
             save_state(STATE_FILE, {"symbol": signal['symbol'], "entry_price": signal['entry_price']})
@@ -189,89 +177,74 @@ def main_cycle():
         with open(LAST_RUN_FILE, 'w') as f:
             f.write(str(int(time.time())))
     except Exception as e:
-        print(f"❌ Ошибка базового цикла: {e}")
+        pass
 
 # ==========================================================
-# ЛОВЕЦ ДАМПОВ (ПОЛНОЦЕННЫЙ СКАНЕР НА 15-МИНУТНЫХ СВЕЧАХ)
+# ЛОВЕЦ ДАМПОВ 2.0 (НЕЙРОСЕТЬ ГЛАВНАЯ, МАТЕМАТИКА - ПОДСКАЗЧИК)
 # ==========================================================
-def check_pump_dump():
+def check_pump_dump_ai():
     if not is_working_hours():
         return
 
-    print("🎯 Запуск Ловца дампов (ТОП-30, 15-мин свечи)...")
-    prices_24h = get_top_n_prices_from_mexc(30)
-    if not prices_24h:
-        return
+    print("🎯 Сканер (15 мин): ищу аномалии в ТОП-30...")
+    prices = get_top_n_prices_from_mexc(30)
+    if not prices: return
 
-    # Текущее состояние отслеживания
-    dump_state = load_state(DUMP_STATE_FILE)
-    current_time = time.time()
-    new_dump_state = {}
-
-    for sym in prices_24h.keys():
-        # Получаем 15-минутные свечи для этой монеты
+    for sym in prices.keys():
         candles = get_15m_candle(sym)
-        if not candles or len(candles) < 2:
+        if not candles or len(candles) < 3:
             continue
 
-        # Последняя и предпоследняя свечи
         last = candles[-1]
         prev = candles[-2]
-        # Средний объем за последние 3 свечи (45 минут)
-        avg_volume = sum(c['volume'] for c in candles[-3:]) / 3 if len(candles) >= 3 else prev['volume']
+        # Средний объем за 3 последние свечи (45 минут)
+        avg_volume = sum(c['volume'] for c in candles[-3:]) / 3
 
-        # Этап 1: Обнаружение пампа
-        if sym not in dump_state:
-            # Изменение цены за 15 минут
-            change = (last['close'] - prev['close']) / prev['close']
-            # Рост цены >= 5% И объем текущей свечи в 2.5 раза выше среднего
-            if change >= 0.05 and last['volume'] > avg_volume * 2.5:
-                print(f"⚡ Обнаружен памп по {sym} за 15 мин!")
-                new_dump_state[sym] = {
-                    'detected_at': current_time,
-                    'pump_price': last['close'],
-                    'pump_volume': last['volume'],
-                    'phase': 'detected'
-                }
-        
-        # Этап 2: Подтверждение дампа (проверка застывания через 30 минут)
-        elif sym in dump_state:
-            entry = dump_state[sym]
-            time_diff = current_time - entry['detected_at']
+        # МАТЕМАТИКА-ПОДСКАЗЧИК: ищем резкий всплеск (за 15 мин)
+        if avg_volume == 0: continue
+        change = (last['close'] - prev['close']) / prev['close']
+        vol_ratio = last['volume'] / avg_volume
+
+        # Если цена выросла > 3.5% И объем > среднего в 2.2 раза
+        if change >= 0.035 and vol_ratio >= 2.2:
+            print(f"⚡ Аномалия по {sym}! Отправляю в Llama 3.3...")
             
-            # Проверяем, прошло ли 30 минут (и не более 45 минут)
-            if 1650 < time_diff < 2700: # Примерно 27-45 минут
-                # Цена застыла? (изменение за последние 15 минут < 0.5%)
-                change_last_15 = (last['close'] - prev['close']) / prev['close']
-                # Объем упал на 60% от пикового объема пампа?
-                vol_drop = last['volume'] / entry['pump_volume']
-
-                if abs(change_last_15) < 0.005 and vol_drop <= 0.4:
-                    print(f"🎯 Дамп подтвержден по {sym}!")
-                    # Вход по цене пика пампа (текущая застывшая цена)
+            # НЕЙРОСЕТЬ ГЛАВНАЯ: формируем запрос к Llama 3.3
+            prompt = f"""
+Ты трейдер-аналитик. Обнаружена аномалия по монете {sym}.
+За 15 минут цена выросла на {change*100:.1f}%.
+Объём в {vol_ratio:.1f} раз выше среднего за последние 45 минут.
+Проанализируй: это реальный памп (за которым последует дамп) или ложное движение?
+Если это реальный памп, дай подтверждение на SHORT.
+Если НЕТ — отмени сигнал.
+Ответь строго JSON:
+{{"confirm": true/false, "reason": "..."}}
+"""
+            headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+            data = {"model": MODEL, "messages": [{"role": "user", "content": prompt}]}
+            
+            try:
+                resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
+                result = resp.json()
+                if "error" in result: continue
+                raw = result['choices'][0]['message']['content']
+                match = re.search(r'\{.*\}', raw, re.DOTALL)
+                decision = json.loads(match.group()) if match else json.loads(raw)
+                
+                if decision.get('confirm') is True:
                     entry_price = last['close']
                     take_profit = entry_price * 0.90
                     stop_loss = entry_price * 1.05
-
-                    msg = f"🎯 ЛОВЕЦ ДАМПОВ: SHORT {sym}\n"
+                    
+                    msg = f"🎯 ЛОВЕЦ ДАМПОВ (ИИ): SHORT {sym}\n"
                     msg += f"🟢 Вход: {entry_price:.4f}\n"
                     msg += f"🎯 Тейк (-10%): {take_profit:.4f}\n"
                     msg += f"⛔ Стоп (+5%): {stop_loss:.4f}\n"
-                    msg += f"💬 Причина: Памп завершён, объём иссяк, цена застыла. Начинается дамп."
+                    msg += f"💬 Причина: {decision.get('reason')}"
                     send_telegram(msg)
-                    print(f"✅ Дамп-сигнал отправлен по {sym}")
-                    # Удаляем из состояния, чтобы не дублировать
-                    continue
-                else:
-                    new_dump_state[sym] = entry
-            elif time_diff > 2700:
-                # Снимаем метку, если прошло больше 45 минут (истекло окно)
-                continue
-            else:
-                new_dump_state[sym] = entry
-
-    # Сохраняем обновленное состояние
-    save_state(DUMP_STATE_FILE, new_dump_state)
+                    print(f"✅ Llama подтвердила дамп по {sym}! Сигнал отправлен.")
+            except:
+                pass
 
 # --- ФОНОВЫЙ ПОТОК (УПРАВЛЕНИЕ РАСПИСАНИЕМ) ---
 def bg_alarm():
@@ -282,19 +255,18 @@ def bg_alarm():
         try:
             now = time.time()
             
-            # Базовый цикл (проверка каждые 30 минут, но отправка строго раз в 2 часа)
+            # Базовый цикл (проверка каждые 30 минут)
             if now - last_main_check >= 1800:
                 main_cycle()
                 last_main_check = now
 
             # Сканер дампа (строго каждые 15 минут)
             if now - last_dump_check >= 900:
-                check_pump_dump()
+                check_pump_dump_ai()
                 last_dump_check = now
 
-            time.sleep(30) # Держим цикл активным
+            time.sleep(30)
         except Exception as e:
-            print(f"⚠️ Ошибка фонового потока: {e}")
             time.sleep(300)
 
 # --- ОБРАБОТЧИК ЗАПРОСОВ (ДЛЯ RENDER) ---
