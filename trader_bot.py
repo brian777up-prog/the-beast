@@ -23,10 +23,41 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
 STATE_FILE = "trade_state.json"
 LAST_RUN_FILE = "last_run.txt"
-DUMP_STATE_FILE = "dump_state.json"  # Память для ловца дампов
+DUMP_STATE_FILE = "dump_state.json"
 # ==========================================================
 
 app = Flask(__name__)
+
+# ==========================================================
+# КЭШ ДЛЯ НОВОСТЕЙ (Ловец обновляет, Базовый читает)
+# ==========================================================
+NEWS_CACHE = {"last_update": 0, "headlines": []}
+
+def update_news_cache():
+    global NEWS_CACHE
+    now = time.time()
+    # Обновляем кэш только если прошло 30 минут (1800 секунд)
+    if now - NEWS_CACHE["last_update"] < 1800:
+        return NEWS_CACHE["headlines"]
+    
+    try:
+        # ТОП-5 свежих новостей через бесплатный API CryptoPanic
+        url = "https://cryptopanic.com/api/v1/posts/?public=true&limit=5"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            headlines = [post['title'] for post in data['results'][:5]]
+            NEWS_CACHE = {"last_update": now, "headlines": headlines}
+            print(f"📰 Новости обновлены: {headlines}")
+        else:
+            print(f"⚠️ Ошибка CryptoPanic: {resp.status_code}")
+    except Exception as e:
+        print(f"❌ Ошибка получения новостей: {e}")
+    
+    return NEWS_CACHE["headlines"]
+# ==========================================================
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def load_state(filename):
@@ -49,9 +80,9 @@ def save_state(filename, data):
 def is_working_hours():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
-    return 14 <= hour_ekb < 24
+    return (hour_ekb >= 14) or (hour_ekb < 2)
 
-# --- ЗАПРОС ТОП-30 МОНЕТ С MEXC (с фильтром ликвидности) ---
+# --- ЗАПРОС ТОП-30 МОНЕТ С MEXC (порог 500 000 USDT) ---
 def get_top_n_prices_from_mexc(n=30):
     prices = {}
     try:
@@ -70,7 +101,7 @@ def get_top_n_prices_from_mexc(n=30):
             # Сортируем по объёму за 24ч
             valid_tickers.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
             
-            # Фильтр ликвидности: минимум $50,000
+            # Фильтр ликвидности: минимум 500,000 USDT
             filtered_tickers = [t for t in valid_tickers if float(t['quoteVolume']) >= 500000]
             
             top_n = filtered_tickers[:n]
@@ -144,12 +175,19 @@ def main_cycle():
 
     trade = load_state(STATE_FILE)
     
+    # Берем новости из кэша (Ловец дампов их обновляет)
+    news = update_news_cache()
+    news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет новостей за последние часы."
+
     prompt = f"Ты трейдер. ТОП-5 монет за 24ч:\n"
     for sym, d in prices.items():
         prompt += f"{sym}: {d['price']} (изм. {d['change_24h']}%) объём {d['volume_24h']}\n"
     if trade:
         prompt += f"\nУ меня открыта сделка: {trade['symbol']} по {trade['entry_price']}. Ждать/закрыть?"
     prompt += f"""
+Свежие новости крипторынка:
+{news_text}
+
 Выбери строго ОДНУ монету. Тейк +{TAKE_PROFIT_PCT}%, Стоп -{STOP_LOSS_PCT}%.
 Ответь строго JSON:
 {{"symbol": "X", "action": "LONG/SHORT/HOLD/CLOSE", "entry_price": X, "take_profit": X, "stop_loss": X, "reason": "X"}}"""
@@ -182,7 +220,7 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ДАМПОВ 2.0 (3-ЧАСОВОЙ ПАМП + 0.5% РАЗВОРОТ + КРАСНАЯ СВЕЧА)
+# ЛОВЕЦ ДАМПОВ 2.0 (С НОВОСТЯМИ)
 # ==========================================================
 def check_pump_dump_ai():
     if not is_working_hours():
@@ -192,6 +230,9 @@ def check_pump_dump_ai():
     prices = get_top_n_prices_from_mexc(30)
     if not prices:
         return
+
+    # Обновляем кэш новостей (каждые 30 минут)
+    update_news_cache()
 
     dump_state = load_state(DUMP_STATE_FILE)
     new_dump_state = {}
@@ -212,7 +253,7 @@ def check_pump_dump_ai():
         current_price = candles[-1]['close']
         change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ПАМПА (рост ≥2% и объем ≥120% за 3 часа) ---
+        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ПАМПА ---
         if sym not in dump_state:
             if change_3h >= 0.02 and vol_ratio >= 2.2:
                 print(f"⚡ Обнаружен 3-часовой памп по {sym}! Ставлю метку.")
@@ -222,7 +263,7 @@ def check_pump_dump_ai():
                     'pump_start_price': price_3h_ago
                 }
 
-        # --- ЭТАП 2: ОБНАРУЖЕНИЕ РАЗВОРОТА (падение 0.5% от пика + красная свеча) ---
+        # --- ЭТАП 2: ОБНАРУЖЕНИЕ РАЗВОРОТА ---
         elif sym in dump_state and dump_state[sym].get('detected'):
             entry = dump_state[sym]
             peak = entry['peak_price']
@@ -232,11 +273,18 @@ def check_pump_dump_ai():
             if drop_percent <= -0.005 and is_red_candle:
                 print(f"🎯 Разворот по {sym}! Падение 0.5% от пика, свеча красная. Бужу Llama...")
                 
+                news = NEWS_CACHE["headlines"]
+                news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
+
                 prompt = f"""
 Ты трейдер. За 3 часа по {sym}:
 - Цена выросла на {change_3h*100:.1f}%
 - Объем вырос в {vol_ratio:.1f} раз.
 Цена достигла пика {peak}, упала на 0.5% и свеча красная.
+
+Свежие новости:
+{news_text}
+
 Это реальный дамп? Если да, подтверди SHORT.
 Дай Тейк в диапазоне от -2% до -12%.
 Дай Стоп в диапазоне от +1% до +6%.
@@ -271,11 +319,10 @@ def check_pump_dump_ai():
                         msg += f"💬 Причина: {decision.get('reason')}"
                         send_telegram(msg)
                         print(f"✅ Llama подтвердила дамп по {sym}. Сигнал отправлен!")
-                        continue  # убираем метку
+                        continue
                 except Exception as e:
                     print(f"❌ Ошибка Llama по {sym}: {e}")
             else:
-                # Если разворота еще нет, переносим метку
                 new_dump_state[sym] = entry
 
     save_state(DUMP_STATE_FILE, new_dump_state)
