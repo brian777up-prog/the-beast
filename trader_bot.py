@@ -70,8 +70,8 @@ def get_top_n_prices_from_mexc(n=30):
             # Сортируем по объёму за 24ч
             valid_tickers.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
             
-            # Фильтр ликвидности: минимум $5,000,000
-            filtered_tickers = [t for t in valid_tickers if float(t['quoteVolume']) >= 5000000]
+            # Фильтр ликвидности: минимум $50,000
+            filtered_tickers = [t for t in valid_tickers if float(t['quoteVolume']) >= 500000]
             
             top_n = filtered_tickers[:n]
             
