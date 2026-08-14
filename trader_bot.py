@@ -71,7 +71,7 @@ def save_state(filename, data):
 def is_working_hours():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
-    return (hour_ekb >= 14) or (hour_ekb < 2)
+    return (hour_ekb >= 14) or (hour_ekb < 3)
 
 # ==========================================================
 # ВОЗВРАТ К СПОТОВОМУ API MEXC (ПРОВЕРЕННЫЙ РАБОЧИЙ ВАРИАНТ)
