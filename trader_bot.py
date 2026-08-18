@@ -27,7 +27,16 @@ SYMBOLS = [
     "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "DOTUSDT",
     "AVAXUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
     "BCHUSDT", "XLMUSDT", "PAXGUSDT", "FILUSDT", "TONUSDT",
-    "SHIBUSDT", "NEARUSDT", "APTUSDT", "ZECUSDT", "GRTUSDT"
+    "SHIBUSDT", "NEARUSDT", "APTUSDT", "ZECUSDT", "GRTUSDT",
+    # НОВЫЕ 25 (из ТОП-100 + твои запрошенные)
+    "WLDUSDT",      # Запрошено
+    "FARTCOINUSDT", # Запрошено
+    "GUNUSDT",      # Запрошено
+    "SUIUSDT", "SEIUSDT", "INJUSDT", "RNDRUSDT", "FETUSDT",
+    "TAOUSDT", "AAVEUSDT", "MKRUSDT", "CRVUSDT", "ARBUSDT",
+    "OPUSDT", "STXUSDT", "ALGOUSDT", "HBARUSDT", "KASUSDT",
+    "ICPUSDT", "VETUSDT", "EGLDUSDT", "RUNEUSDT", "ENSUSDT",
+    "LDOUSDT", "QNTUSDT"
 ]
 
 STATE_FILE = "trade_state.json"
@@ -138,7 +147,7 @@ def is_choppy_market(candles):
         return True
     last_close = candles[-1]['close']
     # Если цена в коридоре 1.5 ATR от EMA20 — это боковик
-    if abs(last_close - ema) < (atr * 1.5):
+    if abs(last_close - ema) < (atr * 1.0):
         return True
     return False
 
