@@ -177,7 +177,6 @@ def is_choppy_market(candles):
     if ema is None or atr is None:
         return True
     last_close = candles[-1]['close']
-    # Порог 1.0 (ослабленный)
     if abs(last_close - ema) < (atr * 1.0):
         return True
     return False
@@ -263,13 +262,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ДАМПОВ 3.0 (ДВА СЦЕНАРИЯ + EMA/ATR + НОВОСТИ)
+# ЛОВЕЦ ДАМПОВ 3.0 (ТЕПЕРЬ ДВУНАПРАВЛЕННЫЙ: LONG И SHORT)
 # ==========================================================
 def check_pump_dump_ai():
     if not is_working_hours():
         return
 
-    print("🎯 Сканер (15 мин): ищу пампы по 2-м сценариям в ТОП-50...")
+    print("🎯 Сканер (15 мин): ищу пампы (SHORT) и дампы (LONG) в ТОП-50...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -287,7 +286,7 @@ def check_pump_dump_ai():
         if not candles or len(candles) < 30:
             continue
 
-        # Фильтр EMA/ATR (порог 1.0)
+        # ФИЛЬТР БОКОВИКА
         if is_choppy_market(candles):
             print(f"⚠️ Монета {sym} в боковике (EMA/ATR). Пропускаю.")
             continue
@@ -300,84 +299,134 @@ def check_pump_dump_ai():
         current_price = candles[-1]['close']
         change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ПАМПА ---
+        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ДВИЖЕНИЯ (ПАМП ДЛЯ ШОРТА ИЛИ ДАМП ДЛЯ ЛОНГА) ---
         if sym not in dump_state:
-            is_strong = (change_3h >= 0.02 and vol_ratio >= 2.2)
-            is_moderate = (change_3h >= 0.01 and vol_ratio >= 1.5)
+            # Проверяем условия для ШОРТА (рост)
+            is_strong_short = (change_3h >= 0.02 and vol_ratio >= 2.2)
+            is_moderate_short = (change_3h >= 0.01 and vol_ratio >= 1.5)
 
-            if is_strong or is_moderate:
-                print(f"⚡ Обнаружен памп по {sym}! Тип: {'СИЛЬНЫЙ' if is_strong else 'УМЕРЕННЫЙ'}")
+            # Проверяем условия для ЛОНГА (падение)
+            is_strong_long = (change_3h <= -0.02 and vol_ratio >= 2.2)
+            is_moderate_long = (change_3h <= -0.01 and vol_ratio >= 1.5)
+
+            direction = None
+            if is_strong_short or is_moderate_short:
+                direction = 'SHORT'
+            elif is_strong_long or is_moderate_long:
+                direction = 'LONG'
+
+            if direction:
+                print(f"⚡ Обнаружено движение по {sym}! Направление: {direction}")
                 new_dump_state[sym] = {
                     'detected': True,
-                    'peak_price': current_price,
+                    'direction': direction,  # SHORT или LONG
+                    'extreme_price': current_price, # Пик для SHORT, дно для LONG
                     'pump_start_price': price_3h_ago,
-                    'type': 'strong' if is_strong else 'moderate'
+                    'type': 'strong' if (direction == 'SHORT' and is_strong_short) or (direction == 'LONG' and is_strong_long) else 'moderate'
                 }
 
         # --- ЭТАП 2: ОБНАРУЖЕНИЕ РАЗВОРОТА ---
         elif sym in dump_state and dump_state[sym].get('detected'):
             entry = dump_state[sym]
-            peak = entry['peak_price']
-            drop_percent = (current_price - peak) / peak
+            extreme_price = entry['extreme_price']
+            direction = entry['direction']
             is_red_candle = candles[-1]['close'] < candles[-1]['open']
+            is_green_candle = candles[-1]['close'] > candles[-1]['open']
+            target_move = 0.005 if entry.get('type') == 'strong' else 0.0025 # 0.5% или 0.25%
 
-            target_drop = 0.005 if entry.get('type') == 'strong' else 0.0025
+            # ЛОГИКА ДЛЯ ШОРТА: цена упала от пика И свеча красная
+            if direction == 'SHORT':
+                drop_percent = (current_price - extreme_price) / extreme_price
+                if drop_percent <= -target_move and is_red_candle:
+                    print(f"🎯 Разворот вниз по {sym}! Падение {abs(drop_percent)*100:.2f}% от пика. Бужу DeepSeek...")
+                    # (Код отправки в DeepSeek с промптом для SHORT)
+                    self._trigger_ai_decision(sym, direction, change_3h, vol_ratio, extreme_price, drop_percent, is_red_candle, entry, current_price)
 
-            if drop_percent <= -target_drop and is_red_candle:
-                print(f"🎯 Разворот по {sym}! Падение {abs(drop_percent)*100:.2f}% от пика. Бужу DeepSeek...")
+            # ЛОГИКА ДЛЯ ЛОНГА: цена выросла от дна И свеча зеленая
+            elif direction == 'LONG':
+                rise_percent = (current_price - extreme_price) / extreme_price
+                if rise_percent >= target_move and is_green_candle:
+                    print(f"🎯 Разворот вверх по {sym}! Рост {abs(rise_percent)*100:.2f}% от дна. Бужу DeepSeek...")
+                    # (Код отправки в DeepSeek с промптом для LONG)
+                    self._trigger_ai_decision(sym, direction, change_3h, vol_ratio, extreme_price, rise_percent, is_green_candle, entry, current_price)
 
-                news = update_news_cache()
-                news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
+            # Если разворота еще нет, переносим метку
+            else:
+                new_dump_state[sym] = entry
 
-                prompt = f"""
+    save_state(DUMP_STATE_FILE, new_dump_state)
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK ---
+def _trigger_ai_decision(self, sym, direction, change_3h, vol_ratio, extreme_price, reversal_percent, is_target_candle, entry, current_price):
+    news = update_news_cache()
+    news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
+
+    if direction == 'SHORT':
+        prompt = f"""
 Ты трейдер. За 3 часа по {sym}:
 - Цена выросла на {change_3h*100:.1f}%
 - Объем вырос в {vol_ratio:.1f} раз.
-Цена достигла пика {peak}, упала на {abs(drop_percent)*100:.2f}% и свеча красная.
+Цена достигла пика {extreme_price}, упала на {abs(reversal_percent)*100:.2f}% и свеча красная.
 
 Свежие новости:
 {news_text}
 
-Это реальный дамп? Если да, подтверди SHORT.
+Это реальный дамп (разворот вниз)? Если да, подтверди SHORT.
 Дай Тейк в диапазоне от -2% до -12%.
 Дай Стоп в диапазоне от +1% до +6%.
 Ответь строго JSON:
 {{"confirm": true/false, "reason": "...", "tp_percent": float, "sl_percent": float}}
 """
-                headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
-                data = {"model": MODEL, "messages": [{"role": "user", "content": prompt}]}
+    elif direction == 'LONG':
+        prompt = f"""
+Ты трейдер. За 3 часа по {sym}:
+- Цена упала на {abs(change_3h)*100:.1f}%
+- Объем вырос в {vol_ratio:.1f} раз.
+Цена достигла дна {extreme_price}, выросла на {abs(reversal_percent)*100:.2f}% и свеча зеленая.
 
-                try:
-                    resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
-                    result = resp.json()
-                    if "error" in result:
-                        continue
-                    raw = result['choices'][0]['message']['content']
-                    match = re.search(r'\{.*\}', raw, re.DOTALL)
-                    decision = json.loads(match.group()) if match else json.loads(raw)
+Свежие новости:
+{news_text}
 
-                    if decision.get('confirm') is True:
-                        entry_price = peak
-                        tp_percent = decision.get('tp_percent', -10.0)
-                        sl_percent = decision.get('sl_percent', 5.0)
+Это реальный отскок (разворот вверх)? Если да, подтверди LONG.
+Дай Тейк в диапазоне от +2% до +12%.
+Дай Стоп в диапазоне от -1% до -6%.
+Ответь строго JSON:
+{{"confirm": true/false, "reason": "...", "tp_percent": float, "sl_percent": float}}
+"""
 
-                        tp_percent = max(-12.0, min(-2.0, tp_percent))
-                        sl_percent = max(1.0, min(6.0, sl_percent))
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    data = {"model": MODEL, "messages": [{"role": "user", "content": prompt}]}
 
-                        msg = f"🎯 ЛОВЕЦ ДАМПОВ (ИИ): SHORT {sym}\n"
-                        msg += f"🟢 Вход (пик): {entry_price:.4f}\n"
-                        msg += f"🎯 Тейк ({tp_percent:.1f}%): {entry_price * (1 + tp_percent/100):.4f}\n"
-                        msg += f"⛔ Стоп (+{sl_percent:.1f}%): {entry_price * (1 + sl_percent/100):.4f}\n"
-                        msg += f"💬 Причина: {decision.get('reason')}"
-                        send_telegram(msg)
-                        print(f"✅ DeepSeek подтвердила дамп по {sym}. Сигнал отправлен!")
-                        continue
-                except Exception as e:
-                    print(f"❌ Ошибка DeepSeek по {sym}: {e}")
-            else:
-                new_dump_state[sym] = entry
+    try:
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
+        result = resp.json()
+        if "error" in result: return
+        raw = result['choices'][0]['message']['content']
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        decision = json.loads(match.group()) if match else json.loads(raw)
 
-    save_state(DUMP_STATE_FILE, new_dump_state)
+        if decision.get('confirm') is True:
+            entry_price = extreme_price
+            tp_percent = decision.get('tp_percent', -10.0 if direction == 'SHORT' else 10.0)
+            sl_percent = decision.get('sl_percent', 5.0 if direction == 'SHORT' else -5.0)
+
+            if direction == 'SHORT':
+                tp_percent = max(-12.0, min(-2.0, tp_percent))
+                sl_percent = max(1.0, min(6.0, sl_percent))
+            elif direction == 'LONG':
+                tp_percent = max(2.0, min(12.0, tp_percent))
+                sl_percent = max(-6.0, min(-1.0, sl_percent))
+
+            msg = f"🎯 ЛОВЕЦ ДАМПОВ (ИИ): {direction} {sym}\n"
+            msg += f"🟢 Вход ({'пик' if direction == 'SHORT' else 'дно'}): {entry_price:.4f}\n"
+            msg += f"🎯 Тейк ({tp_percent:.1f}%): {entry_price * (1 + tp_percent/100):.4f}\n"
+            msg += f"⛔ Стоп ({sl_percent:.1f}%): {entry_price * (1 + sl_percent/100):.4f}\n"
+            msg += f"💬 Причина: {decision.get('reason')}"
+            send_telegram(msg)
+            print(f"✅ DeepSeek подтвердила {direction} по {sym}. Сигнал отправлен!")
+            return
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek по {sym}: {e}")
 
 # ==========================================================
 # ФОНОВЫЙ ПОТОК
