@@ -103,7 +103,7 @@ def save_state(filename, data):
 def is_working_hours():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
-    return (hour_ekb >= 14) or (hour_ekb < 3)
+    return (hour_ekb >= 14) or (hour_ekb < 4)
 
 # --- ФУНКЦИИ ДАННЫХ MEXC ---
 def get_ticker(symbol):
