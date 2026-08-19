@@ -5,6 +5,7 @@ import time
 import re
 import os
 import threading
+import xml.etree.ElementTree as ET
 from flask import Flask
 
 # ==========================================================
@@ -14,29 +15,22 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# МОДЕЛЬ (DeepSeek V4 Pro)
 MODEL = "deepseek/deepseek-v4-pro"
 
-# Проценты для базового режима
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", 4.0))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
-# ФИКСИРОВАННЫЙ СПИСОК ТОП-25 МОНЕТ
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "DOTUSDT",
     "AVAXUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
     "BCHUSDT", "XLMUSDT", "PAXGUSDT", "FILUSDT", "TONUSDT",
     "SHIBUSDT", "NEARUSDT", "APTUSDT", "ZECUSDT", "GRTUSDT",
-    # НОВЫЕ 25 (из ТОП-100 + твои запрошенные)
-    "WLDUSDT",      # Запрошено
-    "FARTCOINUSDT", # Запрошено
-    "GUNUSDT",      # Запрошено
-    "SUIUSDT", "SEIUSDT", "INJUSDT", "RNDRUSDT", "FETUSDT",
-    "TAOUSDT", "AAVEUSDT", "MKRUSDT", "CRVUSDT", "ARBUSDT",
-    "OPUSDT", "STXUSDT", "ALGOUSDT", "HBARUSDT", "KASUSDT",
-    "ICPUSDT", "VETUSDT", "EGLDUSDT", "RUNEUSDT", "ENSUSDT",
-    "LDOUSDT", "QNTUSDT"
+    "WLDUSDT", "FARTCOINUSDT", "GUNUSDT", "SUIUSDT", "SEIUSDT",
+    "INJUSDT", "RNDRUSDT", "FETUSDT", "TAOUSDT", "AAVEUSDT",
+    "MKRUSDT", "CRVUSDT", "ARBUSDT", "OPUSDT", "STXUSDT",
+    "ALGOUSDT", "HBARUSDT", "KASUSDT", "ICPUSDT", "VETUSDT",
+    "EGLDUSDT", "RUNEUSDT", "ENSUSDT", "LDOUSDT", "QNTUSDT"
 ]
 
 STATE_FILE = "trade_state.json"
@@ -45,6 +39,49 @@ DUMP_STATE_FILE = "dump_state.json"
 # ==========================================================
 
 app = Flask(__name__)
+
+# ==========================================================
+# МОДУЛЬ RSS-НОВОСТЕЙ
+# ==========================================================
+NEWS_CACHE = {"last_update": 0, "headlines": []}
+
+RSS_FEEDS = [
+    "https://cointelegraph.com/feed",
+    "https://www.coindesk.com/feed/",
+    "https://cryptonews.com/news/feed/"
+]
+
+def fetch_rss_headlines():
+    headlines = []
+    for feed_url in RSS_FEEDS:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = requests.get(feed_url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                for item in root.findall('.//item'):
+                    title_elem = item.find('title')
+                    if title_elem is not None and title_elem.text:
+                        headlines.append(title_elem.text.strip())
+        except Exception as e:
+            print(f"⚠️ Ошибка парсинга {feed_url}: {e}")
+    unique_headlines = list(dict.fromkeys(headlines))[:5]
+    return unique_headlines
+
+def update_news_cache():
+    global NEWS_CACHE
+    now = time.time()
+    if now - NEWS_CACHE["last_update"] < 1800:
+        return NEWS_CACHE["headlines"]
+    print("📰 Сканирую RSS-ленты для свежих новостей...")
+    new_headlines = fetch_rss_headlines()
+    if new_headlines:
+        NEWS_CACHE = {"last_update": now, "headlines": new_headlines}
+        print(f"📰 Новости обновлены: {new_headlines}")
+    else:
+        print("⚠️ Не удалось получить свежие новости.")
+    return NEWS_CACHE["headlines"]
+# ==========================================================
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def load_state(filename):
@@ -63,17 +100,12 @@ def save_state(filename, data):
     except:
         pass
 
-# --- ПРОВЕРКА ВРЕМЕНИ (ЕКАТЕРИНБУРГ UTC+5) ---
 def is_working_hours():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
     return (hour_ekb >= 14) or (hour_ekb < 3)
 
-# ==========================================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ MEXC (СПОТ)
-# ==========================================================
-
-# ЗАПРОС ЦЕН ПО КОНКРЕТНОЙ МОНЕТЕ
+# --- ФУНКЦИИ ДАННЫХ MEXC ---
 def get_ticker(symbol):
     try:
         url = f"https://api.mexc.com/api/v3/ticker/24hr?symbol={symbol}"
@@ -91,7 +123,6 @@ def get_ticker(symbol):
     except Exception as e:
         return None
 
-# ЗАПРОС 15-МИНУТНЫХ СВЕЧЕЙ (30 ШТУК = 7.5 ЧАСОВ)
 def get_15m_candles(symbol):
     try:
         url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=30"
@@ -114,7 +145,7 @@ def get_15m_candles(symbol):
     except Exception as e:
         return None
 
-# --- ФИЛЬТР EMA/ATR (ОТСЕКАЕМ БОКОВИК) ---
+# --- ФИЛЬТР EMA/ATR (ПОРОГ 1.0) ---
 def calculate_ema(candles, period=20):
     if len(candles) < period:
         return None
@@ -146,7 +177,7 @@ def is_choppy_market(candles):
     if ema is None or atr is None:
         return True
     last_close = candles[-1]['close']
-    # Если цена в коридоре 1.5 ATR от EMA20 — это боковик
+    # Порог 1.0 (ослабленный)
     if abs(last_close - ema) < (atr * 1.0):
         return True
     return False
@@ -178,8 +209,6 @@ def main_cycle():
         return
 
     print("⏰ Запускаю базовый цикл...")
-
-    # Собираем цены по нашим монетам
     prices = {}
     for sym in SYMBOLS:
         ticker = get_ticker(sym)
@@ -189,14 +218,18 @@ def main_cycle():
         return
 
     trade = load_state(STATE_FILE)
+    news = update_news_cache()
+    news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
 
-    # Формируем промпт (без новостей)
-    prompt = f"Ты трейдер. Вот ТОП-25 монет за 24ч (выбери строго ОДНУ для входа):\n"
-    for sym, d in list(prices.items())[:5]:  # Для базы берем только первые 5 (экономия токенов)
+    prompt = f"Ты трейдер. Вот ТОП-5 монет за 24ч (выбери строго ОДНУ для входа):\n"
+    for sym, d in list(prices.items())[:5]:
         prompt += f"{sym}: {d['price']} (изм. {d['change_24h']}%) объём {d['volume_24h']}\n"
     if trade:
         prompt += f"\nУ меня открыта сделка: {trade['symbol']} по {trade['entry_price']}. Ждать/закрыть?"
     prompt += f"""
+Свежие новости крипторынка:
+{news_text}
+
 Выбери строго ОДНУ монету. Тейк +{TAKE_PROFIT_PCT}%, Стоп -{STOP_LOSS_PCT}%.
 Ответь строго JSON:
 {{"symbol": "X", "action": "LONG/SHORT/HOLD/CLOSE", "entry_price": X, "take_profit": X, "stop_loss": X, "reason": "X"}}"""
@@ -230,15 +263,14 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ДАМПОВ 3.0 (ДВА СЦЕНАРИЯ + EMA/ATR)
+# ЛОВЕЦ ДАМПОВ 3.0 (ДВА СЦЕНАРИЯ + EMA/ATR + НОВОСТИ)
 # ==========================================================
 def check_pump_dump_ai():
     if not is_working_hours():
         return
 
-    print("🎯 Сканер (15 мин): ищу пампы по 2-м сценариям в ТОП-25...")
+    print("🎯 Сканер (15 мин): ищу пампы по 2-м сценариям в ТОП-50...")
 
-    # Собираем цены по всем монетам списка
     prices = {}
     for sym in SYMBOLS:
         ticker = get_ticker(sym)
@@ -255,23 +287,20 @@ def check_pump_dump_ai():
         if not candles or len(candles) < 30:
             continue
 
-        # --- ФИЛЬТР EMA/ATR ---
+        # Фильтр EMA/ATR (порог 1.0)
         if is_choppy_market(candles):
             print(f"⚠️ Монета {sym} в боковике (EMA/ATR). Пропускаю.")
             continue
 
-        # Первые 12 свечей (3 часа) — базовый объем
         base_vol = sum(c['volume'] for c in candles[:12]) / 12
-        # Последние 12 свечей (3 часа) — текущий объем
         recent_vol = sum(c['volume'] for c in candles[12:])
         vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
 
-        # Цена 3 часа назад и сейчас
         price_3h_ago = candles[12]['close']
         current_price = candles[-1]['close']
         change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ПАМПА (Два сценария) ---
+        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ПАМПА ---
         if sym not in dump_state:
             is_strong = (change_3h >= 0.02 and vol_ratio >= 2.2)
             is_moderate = (change_3h >= 0.01 and vol_ratio >= 1.5)
@@ -292,16 +321,22 @@ def check_pump_dump_ai():
             drop_percent = (current_price - peak) / peak
             is_red_candle = candles[-1]['close'] < candles[-1]['open']
 
-            target_drop = 0.005 if entry.get('type') == 'strong' else 0.0025  # 0.5% или 0.25%
+            target_drop = 0.005 if entry.get('type') == 'strong' else 0.0025
 
             if drop_percent <= -target_drop and is_red_candle:
                 print(f"🎯 Разворот по {sym}! Падение {abs(drop_percent)*100:.2f}% от пика. Бужу DeepSeek...")
+
+                news = update_news_cache()
+                news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
 
                 prompt = f"""
 Ты трейдер. За 3 часа по {sym}:
 - Цена выросла на {change_3h*100:.1f}%
 - Объем вырос в {vol_ratio:.1f} раз.
 Цена достигла пика {peak}, упала на {abs(drop_percent)*100:.2f}% и свеча красная.
+
+Свежие новости:
+{news_text}
 
 Это реальный дамп? Если да, подтверди SHORT.
 Дай Тейк в диапазоне от -2% до -12%.
@@ -355,12 +390,10 @@ def bg_alarm():
         try:
             now = time.time()
 
-            # Базовый цикл (каждые 30 минут)
             if now - last_main_check >= 1800:
                 main_cycle()
                 last_main_check = now
 
-            # Ловец дампов (каждые 15 минут)
             if now - last_dump_check >= 900:
                 check_pump_dump_ai()
                 last_dump_check = now
