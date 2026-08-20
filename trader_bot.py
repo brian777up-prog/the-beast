@@ -195,16 +195,16 @@ def send_telegram(text):
         pass
 
 # ==========================================================
-# БАЗОВЫЙ ЦИКЛ (2 ЧАСА)
+# БАЗОВЫЙ ЦИКЛ (3 ЧАСА)
 # ==========================================================
 def main_cycle():
     if os.path.exists(LAST_RUN_FILE):
         try:
             with open(LAST_RUN_FILE, 'r') as f:
                 last_run = int(f.read().strip())
-            if time.time() - last_run < 7200:
-                print("⏳ Прошло меньше 2 часов. Пропускаю базовый цикл.")
-                return
+            if time.time() - last_run < 10800:  # 10800 секунд = 3 часа
+    print("⏳ Прошло меньше 3 часов. Пропускаю базовый цикл.")
+    return
         except:
             pass
 
