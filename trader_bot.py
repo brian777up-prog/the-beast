@@ -21,16 +21,24 @@ TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", 4.0))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
 SYMBOLS = [
+    # ТОП-25 (базовый костяк)
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "DOTUSDT",
     "AVAXUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
     "BCHUSDT", "XLMUSDT", "PAXGUSDT", "FILUSDT", "TONUSDT",
     "SHIBUSDT", "NEARUSDT", "APTUSDT", "ZECUSDT", "GRTUSDT",
+    # Следующие 25 (волатильные и топ-альты)
     "WLDUSDT", "FARTCOINUSDT", "GUNUSDT", "SUIUSDT", "SEIUSDT",
     "INJUSDT", "RNDRUSDT", "FETUSDT", "TAOUSDT", "AAVEUSDT",
     "MKRUSDT", "CRVUSDT", "ARBUSDT", "OPUSDT", "STXUSDT",
     "ALGOUSDT", "HBARUSDT", "KASUSDT", "ICPUSDT", "VETUSDT",
-    "EGLDUSDT", "RUNEUSDT", "ENSUSDT", "LDOUSDT", "QNTUSDT"
+    "EGLDUSDT", "RUNEUSDT", "ENSUSDT", "LDOUSDT", "QNTUSDT",
+    # Ещё 25 (добавляем HYPE, ENA и других активных альтов)
+    "HYPEUSDT", "ENAUSDT", "JUPUSDT", "JTOUSDT", "ONDOUSDT",
+    "TIAUSDT", "PYTHUSDT", "AEVOUSDT", "WIFUSDT", "POPCATUSDT",
+    "PENGUUSDT", "PNUTUSDT", "ACTUSDT", "BONKUSDT", "NOTUSDT",
+    "DOGSUSDT", "HMSTRUSDT", "CATIUSDT", "PIXELUSDT", "ALTUSDT",
+    "SAGAUSDT", "DYMUSDT", "STRKUSDT", "MANTAUSDT", "ETHFIUSDT"
 ]
 
 STATE_FILE = "trade_state.json"
@@ -41,7 +49,7 @@ DUMP_STATE_FILE = "dump_state.json"
 app = Flask(__name__)
 
 # ==========================================================
-# МОДУЛЬ RSS-НОВОСТЕЙ
+# МОДУЛЬ RSS-НОВОСТЕЙ (ОБНОВЛЕНИЕ КАЖДЫЕ 15 МИНУТ)
 # ==========================================================
 NEWS_CACHE = {"last_update": 0, "headlines": []}
 
@@ -71,7 +79,8 @@ def fetch_rss_headlines():
 def update_news_cache():
     global NEWS_CACHE
     now = time.time()
-    if now - NEWS_CACHE["last_update"] < 1800:
+    # ОБНОВЛЯЕМ НОВОСТИ КАЖДЫЕ 15 МИНУТ (900 СЕКУНД)
+    if now - NEWS_CACHE["last_update"] < 900:
         return NEWS_CACHE["headlines"]
     print("📰 Сканирую RSS-ленты для свежих новостей...")
     new_headlines = fetch_rss_headlines()
@@ -262,13 +271,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ДАМПОВ 3.0 (ТЕПЕРЬ ДВУНАПРАВЛЕННЫЙ: LONG И SHORT)
+# ЛОВЕЦ РАЗВОРОТОВ (ДВУНАПРАВЛЕННЫЙ + НОВОСТИ 15 МИН)
 # ==========================================================
 def check_pump_dump_ai():
     if not is_working_hours():
         return
 
-    print("🎯 Сканер (15 мин): ищу пампы (SHORT) и дампы (LONG) в ТОП-50...")
+    print("🎯 Сканер (15 мин): ищу пампы (SHORT) и дампы (LONG) в ТОП-75...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -286,7 +295,6 @@ def check_pump_dump_ai():
         if not candles or len(candles) < 30:
             continue
 
-        # ФИЛЬТР БОКОВИКА
         if is_choppy_market(candles):
             print(f"⚠️ Монета {sym} в боковике (EMA/ATR). Пропускаю.")
             continue
@@ -299,13 +307,10 @@ def check_pump_dump_ai():
         current_price = candles[-1]['close']
         change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # --- ЭТАП 1: ОБНАРУЖЕНИЕ ДВИЖЕНИЯ (ПАМП ДЛЯ ШОРТА ИЛИ ДАМП ДЛЯ ЛОНГА) ---
         if sym not in dump_state:
-            # Проверяем условия для ШОРТА (рост)
             is_strong_short = (change_3h >= 0.02 and vol_ratio >= 2.2)
             is_moderate_short = (change_3h >= 0.01 and vol_ratio >= 1.5)
 
-            # Проверяем условия для ЛОНГА (падение)
             is_strong_long = (change_3h <= -0.02 and vol_ratio >= 2.2)
             is_moderate_long = (change_3h <= -0.01 and vol_ratio >= 1.5)
 
@@ -319,38 +324,30 @@ def check_pump_dump_ai():
                 print(f"⚡ Обнаружено движение по {sym}! Направление: {direction}")
                 new_dump_state[sym] = {
                     'detected': True,
-                    'direction': direction,  # SHORT или LONG
-                    'extreme_price': current_price, # Пик для SHORT, дно для LONG
+                    'direction': direction,
+                    'extreme_price': current_price,
                     'pump_start_price': price_3h_ago,
                     'type': 'strong' if (direction == 'SHORT' and is_strong_short) or (direction == 'LONG' and is_strong_long) else 'moderate'
                 }
 
-        # --- ЭТАП 2: ОБНАРУЖЕНИЕ РАЗВОРОТА ---
         elif sym in dump_state and dump_state[sym].get('detected'):
             entry = dump_state[sym]
             extreme_price = entry['extreme_price']
             direction = entry['direction']
             is_red_candle = candles[-1]['close'] < candles[-1]['open']
             is_green_candle = candles[-1]['close'] > candles[-1]['open']
-            target_move = 0.005 if entry.get('type') == 'strong' else 0.0025 # 0.5% или 0.25%
+            target_move = 0.005 if entry.get('type') == 'strong' else 0.0025
 
-            # ЛОГИКА ДЛЯ ШОРТА: цена упала от пика И свеча красная
             if direction == 'SHORT':
                 drop_percent = (current_price - extreme_price) / extreme_price
                 if drop_percent <= -target_move and is_red_candle:
                     print(f"🎯 Разворот вниз по {sym}! Падение {abs(drop_percent)*100:.2f}% от пика. Бужу DeepSeek...")
-                    # (Код отправки в DeepSeek с промптом для SHORT)
                     self._trigger_ai_decision(sym, direction, change_3h, vol_ratio, extreme_price, drop_percent, is_red_candle, entry, current_price)
-
-            # ЛОГИКА ДЛЯ ЛОНГА: цена выросла от дна И свеча зеленая
             elif direction == 'LONG':
                 rise_percent = (current_price - extreme_price) / extreme_price
                 if rise_percent >= target_move and is_green_candle:
                     print(f"🎯 Разворот вверх по {sym}! Рост {abs(rise_percent)*100:.2f}% от дна. Бужу DeepSeek...")
-                    # (Код отправки в DeepSeek с промптом для LONG)
                     self._trigger_ai_decision(sym, direction, change_3h, vol_ratio, extreme_price, rise_percent, is_green_candle, entry, current_price)
-
-            # Если разворота еще нет, переносим метку
             else:
                 new_dump_state[sym] = entry
 
@@ -417,7 +414,8 @@ def _trigger_ai_decision(self, sym, direction, change_3h, vol_ratio, extreme_pri
                 tp_percent = max(2.0, min(12.0, tp_percent))
                 sl_percent = max(-6.0, min(-1.0, sl_percent))
 
-            msg = f"🎯 ЛОВЕЦ ДАМПОВ (ИИ): {direction} {sym}\n"
+            # НОВОЕ НАЗВАНИЕ: ЛОВЕЦ РАЗВОРОТОВ
+            msg = f"🎯 ЛОВЕЦ РАЗВОРОТОВ (ИИ): {direction} {sym}\n"
             msg += f"🟢 Вход ({'пик' if direction == 'SHORT' else 'дно'}): {entry_price:.4f}\n"
             msg += f"🎯 Тейк ({tp_percent:.1f}%): {entry_price * (1 + tp_percent/100):.4f}\n"
             msg += f"⛔ Стоп ({sl_percent:.1f}%): {entry_price * (1 + sl_percent/100):.4f}\n"
