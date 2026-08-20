@@ -21,19 +21,16 @@ TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", 4.0))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
 SYMBOLS = [
-    # ТОП-25 (базовый костяк)
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "DOTUSDT",
     "AVAXUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
     "BCHUSDT", "XLMUSDT", "PAXGUSDT", "FILUSDT", "TONUSDT",
     "SHIBUSDT", "NEARUSDT", "APTUSDT", "ZECUSDT", "GRTUSDT",
-    # Следующие 25 (волатильные и топ-альты)
     "WLDUSDT", "FARTCOINUSDT", "GUNUSDT", "SUIUSDT", "SEIUSDT",
     "INJUSDT", "RNDRUSDT", "FETUSDT", "TAOUSDT", "AAVEUSDT",
     "MKRUSDT", "CRVUSDT", "ARBUSDT", "OPUSDT", "STXUSDT",
     "ALGOUSDT", "HBARUSDT", "KASUSDT", "ICPUSDT", "VETUSDT",
     "EGLDUSDT", "RUNEUSDT", "ENSUSDT", "LDOUSDT", "QNTUSDT",
-    # Ещё 25 (добавляем HYPE, ENA и других активных альтов)
     "HYPEUSDT", "ENAUSDT", "JUPUSDT", "JTOUSDT", "ONDOUSDT",
     "TIAUSDT", "PYTHUSDT", "AEVOUSDT", "WIFUSDT", "POPCATUSDT",
     "PENGUUSDT", "PNUTUSDT", "ACTUSDT", "BONKUSDT", "NOTUSDT",
@@ -43,13 +40,13 @@ SYMBOLS = [
 
 STATE_FILE = "trade_state.json"
 LAST_RUN_FILE = "last_run.txt"
-DUMP_STATE_FILE = "dump_state.json"
+TREND_STATE_FILE = "trend_state.json" # Память для Трендового сканера
 # ==========================================================
 
 app = Flask(__name__)
 
 # ==========================================================
-# МОДУЛЬ RSS-НОВОСТЕЙ (ОБНОВЛЕНИЕ КАЖДЫЕ 15 МИНУТ)
+# МОДУЛЬ RSS-НОВОСТЕЙ (15 МИНУТ)
 # ==========================================================
 NEWS_CACHE = {"last_update": 0, "headlines": []}
 
@@ -79,7 +76,6 @@ def fetch_rss_headlines():
 def update_news_cache():
     global NEWS_CACHE
     now = time.time()
-    # ОБНОВЛЯЕМ НОВОСТИ КАЖДЫЕ 15 МИНУТ (900 СЕКУНД)
     if now - NEWS_CACHE["last_update"] < 900:
         return NEWS_CACHE["headlines"]
     print("📰 Сканирую RSS-ленты для свежих новостей...")
@@ -134,7 +130,7 @@ def get_ticker(symbol):
 
 def get_15m_candles(symbol):
     try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=30"
+        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=40"
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -271,13 +267,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ РАЗВОРОТОВ (ДВУНАПРАВЛЕННЫЙ + НОВОСТИ 15 МИН)
+# ТРЕНДОВЫЙ СКАНЕР (ВМЕСТО ЛОВЦА РАЗВОРОТОВ)
 # ==========================================================
-def check_pump_dump_ai():
+def check_trend_ai():
     if not is_working_hours():
         return
 
-    print("🎯 Сканер (15 мин): ищу пампы (SHORT) и дампы (LONG) в ТОП-75...")
+    print("📈 Трендовый сканер (15 мин): ищу пересечения EMA20/EMA50 в ТОП-75...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -287,106 +283,73 @@ def check_pump_dump_ai():
     if not prices:
         return
 
-    dump_state = load_state(DUMP_STATE_FILE)
-    new_dump_state = {}
+    # Загружаем память трендов (чтобы не спамить и не дублировать)
+    trend_state = load_state(TREND_STATE_FILE)
+    new_trend_state = {}
 
     for sym in prices.keys():
         candles = get_15m_candles(sym)
-        if not candles or len(candles) < 30:
+        if not candles or len(candles) < 40:
             continue
 
+        # Отсекаем боковик
         if is_choppy_market(candles):
             print(f"⚠️ Монета {sym} в боковике (EMA/ATR). Пропускаю.")
             continue
 
-        base_vol = sum(c['volume'] for c in candles[:12]) / 12
-        recent_vol = sum(c['volume'] for c in candles[12:])
-        vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
+        # Считаем EMA20 и EMA50 на последних двух свечах
+        ema20_prev = calculate_ema(candles[:-1], 20)
+        ema50_prev = calculate_ema(candles[:-1], 50)
+        ema20_curr = calculate_ema(candles, 20)
+        ema50_curr = calculate_ema(candles, 50)
 
-        price_3h_ago = candles[12]['close']
-        current_price = candles[-1]['close']
-        change_3h = (current_price - price_3h_ago) / price_3h_ago
+        # Ищем пересечение (кроссовер)
+        is_cross_up = ema20_prev is not None and ema50_prev is not None and ema20_prev < ema50_prev and ema20_curr > ema50_curr
+        is_cross_down = ema20_prev is not None and ema50_prev is not None and ema20_prev > ema50_prev and ema20_curr < ema50_curr
 
-        if sym not in dump_state:
-            is_strong_short = (change_3h >= 0.02 and vol_ratio >= 2.2)
-            is_moderate_short = (change_3h >= 0.01 and vol_ratio >= 1.5)
-
-            is_strong_long = (change_3h <= -0.02 and vol_ratio >= 2.2)
-            is_moderate_long = (change_3h <= -0.01 and vol_ratio >= 1.5)
-
-            direction = None
-            if is_strong_short or is_moderate_short:
-                direction = 'SHORT'
-            elif is_strong_long or is_moderate_long:
-                direction = 'LONG'
-
-            if direction:
-                print(f"⚡ Обнаружено движение по {sym}! Направление: {direction}")
-                new_dump_state[sym] = {
-                    'detected': True,
-                    'direction': direction,
-                    'extreme_price': current_price,
-                    'pump_start_price': price_3h_ago,
-                    'type': 'strong' if (direction == 'SHORT' and is_strong_short) or (direction == 'LONG' and is_strong_long) else 'moderate'
-                }
-
-        elif sym in dump_state and dump_state[sym].get('detected'):
-            entry = dump_state[sym]
-            extreme_price = entry['extreme_price']
-            direction = entry['direction']
-            is_red_candle = candles[-1]['close'] < candles[-1]['open']
-            is_green_candle = candles[-1]['close'] > candles[-1]['open']
-            target_move = 0.005 if entry.get('type') == 'strong' else 0.0025
-
-            if direction == 'SHORT':
-                drop_percent = (current_price - extreme_price) / extreme_price
-                if drop_percent <= -target_move and is_red_candle:
-                    print(f"🎯 Разворот вниз по {sym}! Падение {abs(drop_percent)*100:.2f}% от пика. Бужу DeepSeek...")
-                    self._trigger_ai_decision(sym, direction, change_3h, vol_ratio, extreme_price, drop_percent, is_red_candle, entry, current_price)
-            elif direction == 'LONG':
-                rise_percent = (current_price - extreme_price) / extreme_price
-                if rise_percent >= target_move and is_green_candle:
-                    print(f"🎯 Разворот вверх по {sym}! Рост {abs(rise_percent)*100:.2f}% от дна. Бужу DeepSeek...")
-                    self._trigger_ai_decision(sym, direction, change_3h, vol_ratio, extreme_price, rise_percent, is_green_candle, entry, current_price)
+        # Пропускаем, если на предыдущей свече уже был такой же сигнал
+        last_signal = trend_state.get(sym)
+        if is_cross_up:
+            if last_signal != 'LONG':
+                print(f"📈 {sym}: EMA20 пересекла EMA50 вверх. Сигнал LONG.")
+                self._trigger_trend_decision(sym, 'LONG', prices[sym]['price'], candles)
             else:
-                new_dump_state[sym] = entry
+                new_trend_state[sym] = 'LONG'
+        elif is_cross_down:
+            if last_signal != 'SHORT':
+                print(f"📉 {sym}: EMA20 пересекла EMA50 вниз. Сигнал SHORT.")
+                self._trigger_trend_decision(sym, 'SHORT', prices[sym]['price'], candles)
+            else:
+                new_trend_state[sym] = 'SHORT'
+        else:
+            new_trend_state[sym] = last_signal if last_signal else 'NEUTRAL'
 
-    save_state(DUMP_STATE_FILE, new_dump_state)
+    save_state(TREND_STATE_FILE, new_trend_state)
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK ---
-def _trigger_ai_decision(self, sym, direction, change_3h, vol_ratio, extreme_price, reversal_percent, is_target_candle, entry, current_price):
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK (ТРЕНД) ---
+def _trigger_trend_decision(self, sym, direction, current_price, candles):
+    # Считаем ATR для целевых уровней
+    atr = calculate_atr(candles)
+    if atr is None: atr = 1.0 # Защита, если ATR не посчитался
+    stop_dist = atr * 1.5
+    tp_dist = atr * 3.0
+
     news = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
 
-    if direction == 'SHORT':
-        prompt = f"""
-Ты трейдер. За 3 часа по {sym}:
-- Цена выросла на {change_3h*100:.1f}%
-- Объем вырос в {vol_ratio:.1f} раз.
-Цена достигла пика {extreme_price}, упала на {abs(reversal_percent)*100:.2f}% и свеча красная.
+    prompt = f"""
+Ты трейдер. По монете {sym} произошло пересечение EMA20/EMA50.
+Направление: {direction}.
+Текущая цена: {current_price}.
+Волатильность ATR: {atr}.
 
 Свежие новости:
 {news_text}
 
-Это реальный дамп (разворот вниз)? Если да, подтверди SHORT.
-Дай Тейк в диапазоне от -2% до -12%.
-Дай Стоп в диапазоне от +1% до +6%.
-Ответь строго JSON:
-{{"confirm": true/false, "reason": "...", "tp_percent": float, "sl_percent": float}}
-"""
-    elif direction == 'LONG':
-        prompt = f"""
-Ты трейдер. За 3 часа по {sym}:
-- Цена упала на {abs(change_3h)*100:.1f}%
-- Объем вырос в {vol_ratio:.1f} раз.
-Цена достигла дна {extreme_price}, выросла на {abs(reversal_percent)*100:.2f}% и свеча зеленая.
-
-Свежие новости:
-{news_text}
-
-Это реальный отскок (разворот вверх)? Если да, подтверди LONG.
-Дай Тейк в диапазоне от +2% до +12%.
-Дай Стоп в диапазоне от -1% до -6%.
+Это ложный сигнал (ловушка) или реальное начало тренда?
+Если тренд реальный, подтверди действие.
+Дай Тейк на основе ATR (примерно x2-x3 от входа).
+Дай Стоп на основе ATR (примерно x1-x1.5 от входа).
 Ответь строго JSON:
 {{"confirm": true/false, "reason": "...", "tp_percent": float, "sl_percent": float}}
 """
@@ -403,22 +366,24 @@ def _trigger_ai_decision(self, sym, direction, change_3h, vol_ratio, extreme_pri
         decision = json.loads(match.group()) if match else json.loads(raw)
 
         if decision.get('confirm') is True:
-            entry_price = extreme_price
-            tp_percent = decision.get('tp_percent', -10.0 if direction == 'SHORT' else 10.0)
-            sl_percent = decision.get('sl_percent', 5.0 if direction == 'SHORT' else -5.0)
+            tp_percent = decision.get('tp_percent', (tp_dist / current_price) * 100)
+            sl_percent = decision.get('sl_percent', (stop_dist / current_price) * 100)
 
             if direction == 'SHORT':
-                tp_percent = max(-12.0, min(-2.0, tp_percent))
-                sl_percent = max(1.0, min(6.0, sl_percent))
+                tp_percent = -abs(tp_percent)
+                sl_percent = abs(sl_percent)
             elif direction == 'LONG':
-                tp_percent = max(2.0, min(12.0, tp_percent))
-                sl_percent = max(-6.0, min(-1.0, sl_percent))
+                tp_percent = abs(tp_percent)
+                sl_percent = -abs(sl_percent)
 
-            # НОВОЕ НАЗВАНИЕ: ЛОВЕЦ РАЗВОРОТОВ
-            msg = f"🎯 ЛОВЕЦ РАЗВОРОТОВ (ИИ): {direction} {sym}\n"
-            msg += f"🟢 Вход ({'пик' if direction == 'SHORT' else 'дно'}): {entry_price:.4f}\n"
-            msg += f"🎯 Тейк ({tp_percent:.1f}%): {entry_price * (1 + tp_percent/100):.4f}\n"
-            msg += f"⛔ Стоп ({sl_percent:.1f}%): {entry_price * (1 + sl_percent/100):.4f}\n"
+            # Грубая защита от нереалистичных цифр
+            tp_percent = max(-20.0, min(20.0, tp_percent))
+            sl_percent = max(-20.0, min(20.0, sl_percent))
+
+            msg = f"📈 ТРЕНДОВЫЙ СКАНЕР (ИИ): {direction} {sym}\n"
+            msg += f"🟢 Вход: {current_price:.4f}\n"
+            msg += f"🎯 Тейк ({tp_percent:.1f}%): {current_price * (1 + tp_percent/100):.4f}\n"
+            msg += f"⛔ Стоп ({sl_percent:.1f}%): {current_price * (1 + sl_percent/100):.4f}\n"
             msg += f"💬 Причина: {decision.get('reason')}"
             send_telegram(msg)
             print(f"✅ DeepSeek подтвердила {direction} по {sym}. Сигнал отправлен!")
@@ -430,7 +395,7 @@ def _trigger_ai_decision(self, sym, direction, change_3h, vol_ratio, extreme_pri
 # ФОНОВЫЙ ПОТОК
 # ==========================================================
 def bg_alarm():
-    last_dump_check = 0
+    last_trend_check = 0
     last_main_check = 0
 
     while True:
@@ -441,9 +406,9 @@ def bg_alarm():
                 main_cycle()
                 last_main_check = now
 
-            if now - last_dump_check >= 900:
-                check_pump_dump_ai()
-                last_dump_check = now
+            if now - last_trend_check >= 900:
+                check_trend_ai()
+                last_trend_check = now
 
             time.sleep(30)
         except Exception as e:
