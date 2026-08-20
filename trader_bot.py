@@ -40,7 +40,7 @@ SYMBOLS = [
 
 STATE_FILE = "trade_state.json"
 LAST_RUN_FILE = "last_run.txt"
-TREND_STATE_FILE = "trend_state.json" # Память для Трендового сканера
+TREND_STATE_FILE = "trend_state.json"
 # ==========================================================
 
 app = Flask(__name__)
@@ -108,7 +108,7 @@ def save_state(filename, data):
 def is_working_hours():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
-    return (hour_ekb >= 14) or (hour_ekb < 4)
+    return (hour_ekb >= 14) or (hour_ekb < 3)
 
 # --- ФУНКЦИИ ДАННЫХ MEXC ---
 def get_ticker(symbol):
@@ -202,9 +202,10 @@ def main_cycle():
         try:
             with open(LAST_RUN_FILE, 'r') as f:
                 last_run = int(f.read().strip())
-            if time.time() - last_run < 10800:  # 10800 секунд = 3 часа
-    print("⏳ Прошло меньше 3 часов. Пропускаю базовый цикл.")
-    return
+            # Проверка на 3 часа (10800 секунд)
+            if time.time() - last_run < 10800:
+                print("⏳ Прошло меньше 3 часов. Пропускаю базовый цикл.")
+                return
         except:
             pass
 
@@ -283,7 +284,6 @@ def check_trend_ai():
     if not prices:
         return
 
-    # Загружаем память трендов (чтобы не спамить и не дублировать)
     trend_state = load_state(TREND_STATE_FILE)
     new_trend_state = {}
 
@@ -292,22 +292,18 @@ def check_trend_ai():
         if not candles or len(candles) < 40:
             continue
 
-        # Отсекаем боковик
         if is_choppy_market(candles):
             print(f"⚠️ Монета {sym} в боковике (EMA/ATR). Пропускаю.")
             continue
 
-        # Считаем EMA20 и EMA50 на последних двух свечах
         ema20_prev = calculate_ema(candles[:-1], 20)
         ema50_prev = calculate_ema(candles[:-1], 50)
         ema20_curr = calculate_ema(candles, 20)
         ema50_curr = calculate_ema(candles, 50)
 
-        # Ищем пересечение (кроссовер)
         is_cross_up = ema20_prev is not None and ema50_prev is not None and ema20_prev < ema50_prev and ema20_curr > ema50_curr
         is_cross_down = ema20_prev is not None and ema50_prev is not None and ema20_prev > ema50_prev and ema20_curr < ema50_curr
 
-        # Пропускаем, если на предыдущей свече уже был такой же сигнал
         last_signal = trend_state.get(sym)
         if is_cross_up:
             if last_signal != 'LONG':
@@ -326,11 +322,10 @@ def check_trend_ai():
 
     save_state(TREND_STATE_FILE, new_trend_state)
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK (ТРЕНД) ---
 def _trigger_trend_decision(self, sym, direction, current_price, candles):
-    # Считаем ATR для целевых уровней
     atr = calculate_atr(candles)
-    if atr is None: atr = 1.0 # Защита, если ATR не посчитался
+    if atr is None:
+        atr = 1.0
     stop_dist = atr * 1.5
     tp_dist = atr * 3.0
 
@@ -360,7 +355,8 @@ def _trigger_trend_decision(self, sym, direction, current_price, candles):
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
         result = resp.json()
-        if "error" in result: return
+        if "error" in result:
+            return
         raw = result['choices'][0]['message']['content']
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         decision = json.loads(match.group()) if match else json.loads(raw)
@@ -376,7 +372,7 @@ def _trigger_trend_decision(self, sym, direction, current_price, candles):
                 tp_percent = abs(tp_percent)
                 sl_percent = -abs(sl_percent)
 
-            # Грубая защита от нереалистичных цифр
+            # Защита от нереалистичных цифр
             tp_percent = max(-20.0, min(20.0, tp_percent))
             sl_percent = max(-20.0, min(20.0, sl_percent))
 
