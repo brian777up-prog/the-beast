@@ -40,7 +40,7 @@ SYMBOLS = [
 
 STATE_FILE = "trade_state.json"
 LAST_RUN_FILE = "last_run.txt"
-TREND_STATE_FILE = "trend_state.json"
+IMPULSE_STATE_FILE = "impulse_state.json"
 # ==========================================================
 
 app = Flask(__name__)
@@ -130,7 +130,7 @@ def get_ticker(symbol):
 
 def get_15m_candles(symbol):
     try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=40"
+        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=30"
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -150,16 +150,7 @@ def get_15m_candles(symbol):
     except Exception as e:
         return None
 
-# --- ФИЛЬТР EMA/ATR (ПОРОГ 1.0) ---
-def calculate_ema(candles, period=20):
-    if len(candles) < period:
-        return None
-    k = 2 / (period + 1)
-    ema = candles[0]['close']
-    for i in range(1, len(candles)):
-        ema = (candles[i]['close'] - ema) * k + ema
-    return ema
-
+# --- РАСЧЕТ ATR ДЛЯ ФИЛЬТРА ВОЛАТИЛЬНОСТИ ---
 def calculate_atr(candles, period=14):
     if len(candles) < period + 1:
         return None
@@ -173,18 +164,6 @@ def calculate_atr(candles, period=14):
     if len(tr_values) < period:
         return None
     return sum(tr_values[-period:]) / period
-
-def is_choppy_market(candles):
-    if len(candles) < 30:
-        return True
-    ema = calculate_ema(candles)
-    atr = calculate_atr(candles)
-    if ema is None or atr is None:
-        return True
-    last_close = candles[-1]['close']
-    if abs(last_close - ema) < (atr * 1.0):
-        return True
-    return False
 
 # --- ОТПРАВКА В TELEGRAM ---
 def send_telegram(text):
@@ -202,7 +181,6 @@ def main_cycle():
         try:
             with open(LAST_RUN_FILE, 'r') as f:
                 last_run = int(f.read().strip())
-            # Проверка на 3 часа (10800 секунд)
             if time.time() - last_run < 10800:
                 print("⏳ Прошло меньше 3 часов. Пропускаю базовый цикл.")
                 return
@@ -268,13 +246,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ТРЕНДОВЫЙ СКАНЕР (ВМЕСТО ЛОВЦА РАЗВОРОТОВ)
+# ЛОВЕЦ ИМПУЛЬСА (ПРОСТОЙ И БЫСТРЫЙ)
 # ==========================================================
-def check_trend_ai():
+def check_impulse_ai():
     if not is_working_hours():
         return
 
-    print("📈 Трендовый сканер (15 мин): ищу пересечения EMA20/EMA50 в ТОП-75...")
+    print("⚡ Импульсный сканер (15 мин): ищу движения 3%+ в ТОП-75...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -284,67 +262,70 @@ def check_trend_ai():
     if not prices:
         return
 
-    trend_state = load_state(TREND_STATE_FILE)
-    new_trend_state = {}
+    impulse_state = load_state(IMPULSE_STATE_FILE)
+    new_impulse_state = {}
 
     for sym in prices.keys():
         candles = get_15m_candles(sym)
-        if not candles or len(candles) < 40:
+        if not candles or len(candles) < 12:
             continue
 
-        if is_choppy_market(candles):
-            print(f"⚠️ Монета {sym} в боковике (EMA/ATR). Пропускаю.")
+        # ОТСЕКАЕМ МЕРТВЫЕ МОНЕТЫ ПО ATR (без сложного фильтра EMA)
+        atr = calculate_atr(candles)
+        current_price = candles[-1]['close']
+        if atr is None or (atr / current_price) < 0.0015: # Меньше 0.15% - слишком мертво
             continue
 
-        ema20_prev = calculate_ema(candles[:-1], 20)
-        ema50_prev = calculate_ema(candles[:-1], 50)
-        ema20_curr = calculate_ema(candles, 20)
-        ema50_curr = calculate_ema(candles, 50)
+        base_vol = sum(c['volume'] for c in candles[:12]) / 12
+        recent_vol = sum(c['volume'] for c in candles[12:]) if len(candles) >= 24 else sum(c['volume'] for c in candles[:-1])
+        vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
 
-        is_cross_up = ema20_prev is not None and ema50_prev is not None and ema20_prev < ema50_prev and ema20_curr > ema50_curr
-        is_cross_down = ema20_prev is not None and ema50_prev is not None and ema20_prev > ema50_prev and ema20_curr < ema50_curr
+        price_3h_ago = candles[0]['close'] if len(candles) == 12 else candles[-12]['close']
+        change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        last_signal = trend_state.get(sym)
-        if is_cross_up:
-            if last_signal != 'LONG':
-                print(f"📈 {sym}: EMA20 пересекла EMA50 вверх. Сигнал LONG.")
-                self._trigger_trend_decision(sym, 'LONG', prices[sym]['price'], candles)
-            else:
-                new_trend_state[sym] = 'LONG'
-        elif is_cross_down:
-            if last_signal != 'SHORT':
-                print(f"📉 {sym}: EMA20 пересекла EMA50 вниз. Сигнал SHORT.")
-                self._trigger_trend_decision(sym, 'SHORT', prices[sym]['price'], candles)
-            else:
-                new_trend_state[sym] = 'SHORT'
-        else:
-            new_trend_state[sym] = last_signal if last_signal else 'NEUTRAL'
+        # УСЛОВИЕ 1: Резкое движение на 3% за 3 часа
+        if abs(change_3h) >= 0.03:
+            # УСЛОВИЕ 2: Объем в 2 раза выше среднего
+            if vol_ratio >= 2.0:
+                # УСЛОВИЕ 3: Пробой локального экстремума (последние 30 минут)
+                last_two = candles[-2:]
+                if change_3h > 0 and current_price > max(c['high'] for c in last_two):
+                    direction = 'LONG'
+                elif change_3h < 0 and current_price < min(c['low'] for c in last_two):
+                    direction = 'SHORT'
+                else:
+                    continue
 
-    save_state(TREND_STATE_FILE, new_trend_state)
+                # Проверяем, нет ли дубля
+                if impulse_state.get(sym) == direction:
+                    continue
 
-def _trigger_trend_decision(self, sym, direction, current_price, candles):
-    atr = calculate_atr(candles)
-    if atr is None:
-        atr = 1.0
-    stop_dist = atr * 1.5
-    tp_dist = atr * 3.0
+                print(f"⚡ Обнаружен импульс по {sym}! Направление: {direction}")
+                new_impulse_state[sym] = direction
+                _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_ratio, atr)
 
+    save_state(IMPULSE_STATE_FILE, new_impulse_state)
+
+def _trigger_impulse_decision(self, sym, direction, current_price, change_3h, vol_ratio, atr):
     news = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
 
+    tp_dist = atr * 3.0
+    sl_dist = atr * 1.5
+
     prompt = f"""
-Ты трейдер. По монете {sym} произошло пересечение EMA20/EMA50.
+Ты трейдер. По монете {sym} наблюдается сильный импульс.
 Направление: {direction}.
 Текущая цена: {current_price}.
+Изменение за 3 часа: {change_3h*100:.1f}%.
+Объем вырос в {vol_ratio:.1f} раз.
 Волатильность ATR: {atr}.
 
 Свежие новости:
 {news_text}
 
-Это ложный сигнал (ловушка) или реальное начало тренда?
-Если тренд реальный, подтверди действие.
-Дай Тейк на основе ATR (примерно x2-x3 от входа).
-Дай Стоп на основе ATR (примерно x1-x1.5 от входа).
+Это реальный импульс или ложный пробой?
+Если да, подтверди действие. Дай Тейк от ATR (x2-x3) и Стоп от ATR (x1-x1.5).
 Ответь строго JSON:
 {{"confirm": true/false, "reason": "...", "tp_percent": float, "sl_percent": float}}
 """
@@ -363,7 +344,7 @@ def _trigger_trend_decision(self, sym, direction, current_price, candles):
 
         if decision.get('confirm') is True:
             tp_percent = decision.get('tp_percent', (tp_dist / current_price) * 100)
-            sl_percent = decision.get('sl_percent', (stop_dist / current_price) * 100)
+            sl_percent = decision.get('sl_percent', (sl_dist / current_price) * 100)
 
             if direction == 'SHORT':
                 tp_percent = -abs(tp_percent)
@@ -372,11 +353,10 @@ def _trigger_trend_decision(self, sym, direction, current_price, candles):
                 tp_percent = abs(tp_percent)
                 sl_percent = -abs(sl_percent)
 
-            # Защита от нереалистичных цифр
             tp_percent = max(-20.0, min(20.0, tp_percent))
             sl_percent = max(-20.0, min(20.0, sl_percent))
 
-            msg = f"📈 ТРЕНДОВЫЙ СКАНЕР (ИИ): {direction} {sym}\n"
+            msg = f"⚡ ЛОВЕЦ ИМПУЛЬСА (ИИ): {direction} {sym}\n"
             msg += f"🟢 Вход: {current_price:.4f}\n"
             msg += f"🎯 Тейк ({tp_percent:.1f}%): {current_price * (1 + tp_percent/100):.4f}\n"
             msg += f"⛔ Стоп ({sl_percent:.1f}%): {current_price * (1 + sl_percent/100):.4f}\n"
@@ -391,7 +371,7 @@ def _trigger_trend_decision(self, sym, direction, current_price, candles):
 # ФОНОВЫЙ ПОТОК
 # ==========================================================
 def bg_alarm():
-    last_trend_check = 0
+    last_impulse_check = 0
     last_main_check = 0
 
     while True:
@@ -402,9 +382,9 @@ def bg_alarm():
                 main_cycle()
                 last_main_check = now
 
-            if now - last_trend_check >= 900:
-                check_trend_ai()
-                last_trend_check = now
+            if now - last_impulse_check >= 900:
+                check_impulse_ai()
+                last_impulse_check = now
 
             time.sleep(30)
         except Exception as e:
