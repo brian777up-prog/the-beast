@@ -246,13 +246,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ИМПУЛЬСА (ПРОСТОЙ И БЫСТРЫЙ)
+# ЛОВЕЦ ИМПУЛЬСА (СМЯГЧЁННЫЙ: 2% И 1.5x)
 # ==========================================================
 def check_impulse_ai():
     if not is_working_hours():
         return
 
-    print("⚡ Импульсный сканер (15 мин): ищу движения 3%+ в ТОП-75...")
+    print("⚡ Импульсный сканер (15 мин): ищу движения 2%+ в ТОП-75...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -273,7 +273,7 @@ def check_impulse_ai():
         # ОТСЕКАЕМ МЕРТВЫЕ МОНЕТЫ ПО ATR (без сложного фильтра EMA)
         atr = calculate_atr(candles)
         current_price = candles[-1]['close']
-        if atr is None or (atr / current_price) < 0.0015: # Меньше 0.15% - слишком мертво
+        if atr is None or (atr / current_price) < 0.0005: # Меньше 0.05% - слишком мертво
             continue
 
         base_vol = sum(c['volume'] for c in candles[:12]) / 12
@@ -283,15 +283,15 @@ def check_impulse_ai():
         price_3h_ago = candles[0]['close'] if len(candles) == 12 else candles[-12]['close']
         change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # УСЛОВИЕ 1: Резкое движение на 3% за 3 часа
-        if abs(change_3h) >= 0.03:
-            # УСЛОВИЕ 2: Объем в 2 раза выше среднего
-            if vol_ratio >= 2.0:
-                # УСЛОВИЕ 3: Пробой локального экстремума (последние 30 минут)
-                last_two = candles[-2:]
-                if change_3h > 0 and current_price > max(c['high'] for c in last_two):
+        # УСЛОВИЕ 1: Резкое движение на 2% за 3 часа
+        if abs(change_3h) >= 0.02:
+            # УСЛОВИЕ 2: Объем в 1.5 раза выше среднего
+            if vol_ratio >= 1.5:
+                # УСЛОВИЕ 3: Пробой локального экстремума (последние 45 минут)
+                last_three = candles[-3:]
+                if change_3h > 0 and current_price > max(c['high'] for c in last_three):
                     direction = 'LONG'
-                elif change_3h < 0 and current_price < min(c['low'] for c in last_two):
+                elif change_3h < 0 and current_price < min(c['low'] for c in last_three):
                     direction = 'SHORT'
                 else:
                     continue
@@ -371,7 +371,7 @@ def _trigger_impulse_decision(self, sym, direction, current_price, change_3h, vo
 # ФОНОВЫЙ ПОТОК
 # ==========================================================
 def bg_alarm():
-    print("🚀 Фоновый поток запущен!", flush=True)  # <--- ВСТАВИТЬ СЮДА
+    print("🚀 Фоновый поток запущен!", flush=True)  # Строка для проверки
     last_impulse_check = 0
     last_main_check = 0
 
