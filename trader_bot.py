@@ -287,7 +287,7 @@ def check_impulse_ai():
         # УСЛОВИЕ 1: Резкое движение на 1% за 1 час
         if abs(change_3h) >= 0.01:
             # УСЛОВИЕ 2: Объем в 1.5 раза выше среднего
-            if vol_ratio >= 1.5:
+            if vol_ratio >= 1.3:
                 # УСЛОВИЕ 3: Пробой локального экстремума (последние 45 минут)
                 last_three = candles[-3:]
                 if change_3h > 0 and current_price > max(c['high'] for c in last_three):
