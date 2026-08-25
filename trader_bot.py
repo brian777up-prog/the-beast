@@ -246,13 +246,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ИМПУЛЬСА (2% за 1 час, объем 1.5x)
+# ЛОВЕЦ ИМПУЛЬСА (СМЯГЧЁННЫЙ: 2% И 1.5x)
 # ==========================================================
 def check_impulse_ai():
     if not is_working_hours():
         return
 
-    print("⚡ Импульсный сканер (15 мин): ищу движения 2%+ за 1 час в ТОП-75...")
+    print("⚡ Импульсный сканер (15 мин): ищу движения 2%+ в ТОП-75...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -270,43 +270,43 @@ def check_impulse_ai():
         if not candles or len(candles) < 12:
             continue
 
+        # ОТСЕКАЕМ МЕРТВЫЕ МОНЕТЫ ПО ATR (без сложного фильтра EMA)
         atr = calculate_atr(candles)
         current_price = candles[-1]['close']
-        if atr is None or (atr / current_price) < 0.0005:
+        if atr is None or (atr / current_price) < 0.0005: # Меньше 0.05% - слишком мертво
             continue
 
-        # Объем за текущий час (последние 4 свечи) против предыдущего часа
-        base_vol = sum(c['volume'] for c in candles[-8:-4]) / 4
-        recent_vol = sum(c['volume'] for c in candles[-4:])
+        base_vol = sum(c['volume'] for c in candles[:12]) / 12
+        recent_vol = sum(c['volume'] for c in candles[12:]) if len(candles) >= 24 else sum(c['volume'] for c in candles[:-1])
         vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
 
-        # Цена за 1 час
-        price_1h_ago = candles[-4]['close']
-        change_1h = (current_price - price_1h_ago) / price_1h_ago
+        price_3h_ago = candles[0]['close'] if len(candles) == 12 else candles[-12]['close']
+        change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # УСЛОВИЕ 1: Движение на 2% за 1 час
-        if abs(change_1h) >= 0.02:
+        # УСЛОВИЕ 1: Резкое движение на 2% за 3 часа
+        if abs(change_3h) >= 0.02:
             # УСЛОВИЕ 2: Объем в 1.5 раза выше среднего
             if vol_ratio >= 1.5:
-                # УСЛОВИЕ 3: Пробой экстремума последних 45 минут (3 свечи)
+                # УСЛОВИЕ 3: Пробой локального экстремума (последние 45 минут)
                 last_three = candles[-3:]
-                if change_1h > 0 and current_price > max(c['high'] for c in last_three):
+                if change_3h > 0 and current_price > max(c['high'] for c in last_three):
                     direction = 'LONG'
-                elif change_1h < 0 and current_price < min(c['low'] for c in last_three):
+                elif change_3h < 0 and current_price < min(c['low'] for c in last_three):
                     direction = 'SHORT'
                 else:
                     continue
 
+                # Проверяем, нет ли дубля
                 if impulse_state.get(sym) == direction:
                     continue
 
                 print(f"⚡ Обнаружен импульс по {sym}! Направление: {direction}")
                 new_impulse_state[sym] = direction
-                _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_ratio, atr)
+                _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_ratio, atr)
 
     save_state(IMPULSE_STATE_FILE, new_impulse_state)
 
-def _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_ratio, atr):
+def _trigger_impulse_decision(self, sym, direction, current_price, change_3h, vol_ratio, atr):
     news = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
 
@@ -317,7 +317,7 @@ def _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_rati
 Ты трейдер. По монете {sym} наблюдается сильный импульс.
 Направление: {direction}.
 Текущая цена: {current_price}.
-Изменение за 1 час: {change_1h*100:.1f}%.
+Изменение за 3 часа: {change_3h*100:.1f}%.
 Объем вырос в {vol_ratio:.1f} раз.
 Волатильность ATR: {atr}.
 
@@ -371,7 +371,7 @@ def _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_rati
 # ФОНОВЫЙ ПОТОК
 # ==========================================================
 def bg_alarm():
-    print("🚀 Фоновый поток запущен!", flush=True)
+    print("🚀 Фоновый поток запущен!", flush=True)  # Строка для проверки
     last_impulse_check = 0
     last_main_check = 0
 
