@@ -246,13 +246,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ИМПУЛЬСА (СМЯГЧЁННЫЙ: 2% И 1.5x)
+# ЛОВЕЦ ИМПУЛЬСА (СМЯГЧЁННЫЙ: 1% И 1.5x)
 # ==========================================================
 def check_impulse_ai():
     if not is_working_hours():
         return
 
-    print("⚡ Импульсный сканер (15 мин): ищу движения 2%+ в ТОП-75...")
+    print("⚡ Импульсный сканер (15 мин): ищу движения 1%+ в ТОП-75...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -276,7 +276,7 @@ def check_impulse_ai():
         if atr is None or (atr / current_price) < 0.0005:
             continue
 
-        # ИЗМЕНЕНО: 1 ЧАС = 4 СВЕЧИ (для цены и объема)
+        # 1 ЧАС = 4 СВЕЧИ
         base_vol = sum(c['volume'] for c in candles[-8:-4]) / 4
         recent_vol = sum(c['volume'] for c in candles[-4:])
         vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
@@ -284,8 +284,8 @@ def check_impulse_ai():
         price_3h_ago = candles[-4]['close']
         change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # УСЛОВИЕ 1: Резкое движение на 2% за 1 час
-        if abs(change_3h) >= 0.02:
+        # УСЛОВИЕ 1: Резкое движение на 1% за 1 час
+        if abs(change_3h) >= 0.01:
             # УСЛОВИЕ 2: Объем в 1.5 раза выше среднего
             if vol_ratio >= 1.5:
                 # УСЛОВИЕ 3: Пробой локального экстремума (последние 45 минут)
@@ -307,7 +307,6 @@ def check_impulse_ai():
 
     save_state(IMPULSE_STATE_FILE, new_impulse_state)
 
-# ИСПРАВЛЕНИЕ: убран self из параметров
 def _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_ratio, atr):
     news = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
