@@ -371,6 +371,7 @@ def _trigger_impulse_decision(self, sym, direction, current_price, change_3h, vo
 # ФОНОВЫЙ ПОТОК
 # ==========================================================
 def bg_alarm():
+    print("🚀 Фоновый поток запущен!", flush=True)  # <--- ВСТАВИТЬ СЮДА
     last_impulse_check = 0
     last_main_check = 0
 
