@@ -270,20 +270,21 @@ def check_impulse_ai():
         if not candles or len(candles) < 12:
             continue
 
-        # ОТСЕКАЕМ МЕРТВЫЕ МОНЕТЫ ПО ATR (без сложного фильтра EMA)
+        # ОТСЕКАЕМ МЕРТВЫЕ МОНЕТЫ ПО ATR
         atr = calculate_atr(candles)
         current_price = candles[-1]['close']
-        if atr is None or (atr / current_price) < 0.0005: # Меньше 0.05% - слишком мертво
+        if atr is None or (atr / current_price) < 0.0005:
             continue
 
-        base_vol = sum(c['volume'] for c in candles[:12]) / 12
-        recent_vol = sum(c['volume'] for c in candles[12:]) if len(candles) >= 24 else sum(c['volume'] for c in candles[:-1])
+        # ИЗМЕНЕНО: 1 ЧАС = 4 СВЕЧИ (для цены и объема)
+        base_vol = sum(c['volume'] for c in candles[-8:-4]) / 4
+        recent_vol = sum(c['volume'] for c in candles[-4:])
         vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
 
-        price_3h_ago = candles[0]['close'] if len(candles) == 12 else candles[-12]['close']
+        price_3h_ago = candles[-4]['close']
         change_3h = (current_price - price_3h_ago) / price_3h_ago
 
-        # УСЛОВИЕ 1: Резкое движение на 2% за 3 часа
+        # УСЛОВИЕ 1: Резкое движение на 2% за 1 час
         if abs(change_3h) >= 0.02:
             # УСЛОВИЕ 2: Объем в 1.5 раза выше среднего
             if vol_ratio >= 1.5:
@@ -306,7 +307,8 @@ def check_impulse_ai():
 
     save_state(IMPULSE_STATE_FILE, new_impulse_state)
 
-def _trigger_impulse_decision(self, sym, direction, current_price, change_3h, vol_ratio, atr):
+# ИСПРАВЛЕНИЕ: убран self из параметров
+def _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_ratio, atr):
     news = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
 
@@ -317,7 +319,7 @@ def _trigger_impulse_decision(self, sym, direction, current_price, change_3h, vo
 Ты трейдер. По монете {sym} наблюдается сильный импульс.
 Направление: {direction}.
 Текущая цена: {current_price}.
-Изменение за 3 часа: {change_3h*100:.1f}%.
+Изменение за 1 час: {change_3h*100:.1f}%.
 Объем вырос в {vol_ratio:.1f} раз.
 Волатильность ATR: {atr}.
 
@@ -371,7 +373,7 @@ def _trigger_impulse_decision(self, sym, direction, current_price, change_3h, vo
 # ФОНОВЫЙ ПОТОК
 # ==========================================================
 def bg_alarm():
-    print("🚀 Фоновый поток запущен!", flush=True)  # Строка для проверки
+    print("🚀 Фоновый поток запущен!", flush=True)
     last_impulse_check = 0
     last_main_check = 0
 
