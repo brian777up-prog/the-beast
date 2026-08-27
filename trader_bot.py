@@ -150,21 +150,6 @@ def get_15m_candles(symbol):
     except Exception as e:
         return None
 
-# --- РАСЧЕТ ATR ДЛЯ ФИЛЬТРА ВОЛАТИЛЬНОСТИ ---
-def calculate_atr(candles, period=14):
-    if len(candles) < period + 1:
-        return None
-    tr_values = []
-    for i in range(1, len(candles)):
-        high = candles[i]['high']
-        low = candles[i]['low']
-        prev_close = candles[i-1]['close']
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        tr_values.append(tr)
-    if len(tr_values) < period:
-        return None
-    return sum(tr_values[-period:]) / period
-
 # --- ОТПРАВКА В TELEGRAM ---
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
@@ -246,13 +231,13 @@ def main_cycle():
         pass
 
 # ==========================================================
-# ЛОВЕЦ ИМПУЛЬСА (СМЯГЧЁННЫЙ: 1% И 1.5x)
+# ЛОВЕЦ ИМПУЛЬСА (ЯДЕРНАЯ КНОПКА: 0.5% И 1.2x)
 # ==========================================================
 def check_impulse_ai():
     if not is_working_hours():
         return
 
-    print("⚡ Импульсный сканер (15 мин): ищу движения 1%+ в ТОП-75...")
+    print("⚡ Импульсный сканер (15 мин): ищу движения 0.5%+ в ТОП-75...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -270,44 +255,41 @@ def check_impulse_ai():
         if not candles or len(candles) < 12:
             continue
 
-        # ОТСЕКАЕМ МЕРТВЫЕ МОНЕТЫ ПО ATR
-        atr = calculate_atr(candles)
-        current_price = candles[-1]['close']
-        if atr is None or (atr / current_price) < 0.0005:
-            continue
-
         # 1 ЧАС = 4 СВЕЧИ
         base_vol = sum(c['volume'] for c in candles[-8:-4]) / 4
         recent_vol = sum(c['volume'] for c in candles[-4:])
         vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
 
-        price_3h_ago = candles[-4]['close']
-        change_3h = (current_price - price_3h_ago) / price_3h_ago
+        price_1h_ago = candles[-4]['close']
+        change_1h = (current_price - price_1h_ago) / price_1h_ago
 
-        # УСЛОВИЕ 1: Резкое движение на 1% за 1 час
-        if abs(change_3h) >= 0.01:
-            # УСЛОВИЕ 2: Объем в 1.5 раза выше среднего
-            if vol_ratio >= 1.3:
+        # УСЛОВИЕ 1: Резкое движение на 0.5% за 1 час (Ядерная кнопка)
+        if abs(change_1h) >= 0.005:
+            # УСЛОВИЕ 2: Объем в 1.2 раза выше среднего
+            if vol_ratio >= 1.2:
                 # УСЛОВИЕ 3: Пробой локального экстремума (последние 45 минут)
                 last_three = candles[-3:]
-                if change_3h > 0 and current_price > max(c['high'] for c in last_three):
+                if change_1h > 0 and current_price > max(c['high'] for c in last_three):
                     direction = 'LONG'
-                elif change_3h < 0 and current_price < min(c['low'] for c in last_three):
+                elif change_1h < 0 and current_price < min(c['low'] for c in last_three):
                     direction = 'SHORT'
                 else:
                     continue
 
-                # Проверяем, нет ли дубля
-                if impulse_state.get(sym) == direction:
-                    continue
-
+                # НЕТ ПРОВЕРКИ ДУБЛЕЙ
                 print(f"⚡ Обнаружен импульс по {sym}! Направление: {direction}")
                 new_impulse_state[sym] = direction
-                _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_ratio, atr)
+                _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_ratio, candles)
 
-    save_state(IMPULSE_STATE_FILE, new_impulse_state)
+    # СБРАСЫВАЕМ СОСТОЯНИЕ (чтобы бот не блокировал сигналы)
+    save_state(IMPULSE_STATE_FILE, {})
 
-def _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_ratio, atr):
+def _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_ratio, candles):
+    # Восстанавливаем ATR из свечей (для расчета Тейк/Стоп)
+    atr = calculate_atr(candles)
+    if atr is None or atr == 0:
+        atr = current_price * 0.01  # запасное значение
+
     news = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
 
@@ -318,9 +300,8 @@ def _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_rati
 Ты трейдер. По монете {sym} наблюдается сильный импульс.
 Направление: {direction}.
 Текущая цена: {current_price}.
-Изменение за 1 час: {change_3h*100:.1f}%.
+Изменение за 1 час: {change_1h*100:.1f}%.
 Объем вырос в {vol_ratio:.1f} раз.
-Волатильность ATR: {atr}.
 
 Свежие новости:
 {news_text}
@@ -367,6 +348,21 @@ def _trigger_impulse_decision(sym, direction, current_price, change_3h, vol_rati
             return
     except Exception as e:
         print(f"❌ Ошибка DeepSeek по {sym}: {e}")
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ATR (добавлена, т.к. удалили в сканере) ---
+def calculate_atr(candles, period=14):
+    if len(candles) < period + 1:
+        return None
+    tr_values = []
+    for i in range(1, len(candles)):
+        high = candles[i]['high']
+        low = candles[i]['low']
+        prev_close = candles[i-1]['close']
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_values.append(tr)
+    if len(tr_values) < period:
+        return None
+    return sum(tr_values[-period:]) / period
 
 # ==========================================================
 # ФОНОВЫЙ ПОТОК
