@@ -20,22 +20,34 @@ MODEL = "deepseek/deepseek-v4-pro"
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", 4.0))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
+# ==========================================================
+# РАСШИРЕННЫЙ СПИСОК ДО 100 МОНЕТ
+# ==========================================================
 SYMBOLS = [
+    # ТОП-25 (базовый костяк)
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "DOTUSDT",
     "AVAXUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
     "BCHUSDT", "XLMUSDT", "PAXGUSDT", "FILUSDT", "TONUSDT",
     "SHIBUSDT", "NEARUSDT", "APTUSDT", "ZECUSDT", "GRTUSDT",
+    # Следующие 25 (волатильные и топ-альты)
     "WLDUSDT", "FARTCOINUSDT", "GUNUSDT", "SUIUSDT", "SEIUSDT",
     "INJUSDT", "RNDRUSDT", "FETUSDT", "TAOUSDT", "AAVEUSDT",
     "MKRUSDT", "CRVUSDT", "ARBUSDT", "OPUSDT", "STXUSDT",
     "ALGOUSDT", "HBARUSDT", "KASUSDT", "ICPUSDT", "VETUSDT",
     "EGLDUSDT", "RUNEUSDT", "ENSUSDT", "LDOUSDT", "QNTUSDT",
+    # Ещё 25 (HYPE, ENA и другие активные альты)
     "HYPEUSDT", "ENAUSDT", "JUPUSDT", "JTOUSDT", "ONDOUSDT",
     "TIAUSDT", "PYTHUSDT", "AEVOUSDT", "WIFUSDT", "POPCATUSDT",
     "PENGUUSDT", "PNUTUSDT", "ACTUSDT", "BONKUSDT", "NOTUSDT",
     "DOGSUSDT", "HMSTRUSDT", "CATIUSDT", "PIXELUSDT", "ALTUSDT",
-    "SAGAUSDT", "DYMUSDT", "STRKUSDT", "MANTAUSDT", "ETHFIUSDT"
+    "SAGAUSDT", "DYMUSDT", "STRKUSDT", "MANTAUSDT", "ETHFIUSDT",
+    # НОВЫЕ 25 МОНЕТ (до 100)
+    "PEPEUSDT", "FLOKIUSDT", "OMUSDT", "ETCUSDT", "XTZUSDT",
+    "SANDUSDT", "MANAUSDT", "GALAUSDT", "IMXUSDT", "FLOWUSDT",
+    "KAVAUSDT", "ZRXUSDT", "LRCUSDT", "DYDXUSDT", "BLURUSDT",
+    "1INCHUSDT", "RAYUSDT", "ZROUSDT", "WUSDT", "GASUSDT",
+    "API3USDT", "ARUSDT", "JASMYUSDT", "RSRUSDT", "SYNUSDT"
 ]
 
 STATE_FILE = "trade_state.json"
@@ -237,7 +249,7 @@ def check_impulse_ai():
     if not is_working_hours():
         return
 
-    print("⚡ Импульсный сканер (15 мин): ищу движения 0.5%+ в ТОП-75...")
+    print("⚡ Импульсный сканер (15 мин): ищу движения 0.5%+ в ТОП-100...")
 
     prices = {}
     for sym in SYMBOLS:
@@ -255,7 +267,6 @@ def check_impulse_ai():
         if not candles or len(candles) < 12:
             continue
 
-        # !!! ДОБАВЛЕНО ЭТОЙ СТРОКОЙ (восстановили) !!!
         current_price = candles[-1]['close']
 
         # 1 ЧАС = 4 СВЕЧИ
@@ -266,7 +277,7 @@ def check_impulse_ai():
         price_1h_ago = candles[-4]['close']
         change_1h = (current_price - price_1h_ago) / price_1h_ago
 
-        # УСЛОВИЕ 1: Резкое движение на 0.5% за 1 час (Ядерная кнопка)
+        # УСЛОВИЕ 1: Резкое движение на 0.5% за 1 час
         if abs(change_1h) >= 0.005:
             # УСЛОВИЕ 2: Объем в 1.2 раза выше среднего
             if vol_ratio >= 1.2:
@@ -279,19 +290,16 @@ def check_impulse_ai():
                 else:
                     continue
 
-                # НЕТ ПРОВЕРКИ ДУБЛЕЙ
                 print(f"⚡ Обнаружен импульс по {sym}! Направление: {direction}")
                 new_impulse_state[sym] = direction
                 _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_ratio, candles)
 
-    # СБРАСЫВАЕМ СОСТОЯНИЕ (чтобы бот не блокировал сигналы)
     save_state(IMPULSE_STATE_FILE, {})
 
 def _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_ratio, candles):
-    # Восстанавливаем ATR из свечей (для расчета Тейк/Стоп)
     atr = calculate_atr(candles)
     if atr is None or atr == 0:
-        atr = current_price * 0.01  # запасное значение
+        atr = current_price * 0.01
 
     news = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in news]) if news else "Нет свежих новостей."
@@ -404,4 +412,4 @@ if __name__ == "__main__":
     alarm_thread.start()
 
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
