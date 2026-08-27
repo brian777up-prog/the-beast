@@ -255,6 +255,9 @@ def check_impulse_ai():
         if not candles or len(candles) < 12:
             continue
 
+        # !!! ДОБАВЛЕНО ЭТОЙ СТРОКОЙ (восстановили) !!!
+        current_price = candles[-1]['close']
+
         # 1 ЧАС = 4 СВЕЧИ
         base_vol = sum(c['volume'] for c in candles[-8:-4]) / 4
         recent_vol = sum(c['volume'] for c in candles[-4:])
@@ -349,7 +352,7 @@ def _trigger_impulse_decision(sym, direction, current_price, change_1h, vol_rati
     except Exception as e:
         print(f"❌ Ошибка DeepSeek по {sym}: {e}")
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ATR (добавлена, т.к. удалили в сканере) ---
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ATR ---
 def calculate_atr(candles, period=14):
     if len(candles) < period + 1:
         return None
