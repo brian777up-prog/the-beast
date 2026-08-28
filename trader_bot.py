@@ -15,7 +15,7 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 MODEL = "deepseek/deepseek-v4-pro"
 
-STOP_LOSS_PCT = 0.5   # -0.5% от входа
+STOP_LOSS_PCT = 1.5   # -1.5% от входа
 TAKE_PROFIT_PCT = 2.0 # +2.0% от входа
 
 SYMBOLS = [
