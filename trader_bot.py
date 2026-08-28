@@ -15,7 +15,6 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 MODEL = "deepseek/deepseek-v4-pro"
 
-# Параметры торговли (как ты просил)
 STOP_LOSS_PCT = 0.5   # -0.5% от входа
 TAKE_PROFIT_PCT = 2.0 # +2.0% от входа
 
@@ -43,6 +42,8 @@ SYMBOLS = [
 ]
 
 STATE_FILE = "signal_state.json"
+DAILY_LIMIT = 5
+COOLDOWN_HOURS = 4
 # ==========================================================
 
 app = Flask(__name__)
@@ -74,7 +75,7 @@ def get_ticker(symbol):
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            return {'price': float(data['lastPrice'])}
+            return {'price': float(data['lastPrice']), 'volume': float(data['quoteVolume'])}
         return None
     except:
         return None
@@ -88,7 +89,7 @@ def get_15m_candles(symbol):
             data = resp.json()
             candles = []
             for candle in data:
-                candles.append(float(candle[4])) # close
+                candles.append(float(candle[4]))
             return candles
         return None
     except:
@@ -113,24 +114,41 @@ def send_telegram(text):
         pass
 
 # ==========================================================
-# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА"
+# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (С ЛИМИТАМИ)
 # ==========================================================
 def check_ema_cross():
     if not is_working_hours():
         return
 
-    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21...")
+    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (с лимитами)...")
     
-    # Загружаем состояние, чтобы не спамить одинаковыми сигналами
     state = load_state()
     new_state = {}
 
+    # Определяем сегодняшний день (UTC) для дневного лимита
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    
+    # Проверяем дневной лимит
+    if state.get('date') != today:
+        state = {'date': today}
+    
+    signals_today = state.get('signals_today', 0)
+
+    # Если уже достигнут лимит, выходим
+    if signals_today >= DAILY_LIMIT:
+        print(f"🚫 Дневной лимит сигналов ({DAILY_LIMIT}) достигнут. Сегодня больше не отправляем.")
+        save_state(state)
+        return
+
     for sym in SYMBOLS:
+        # Проверяем, не достигли ли мы лимита внутри цикла
+        if signals_today >= DAILY_LIMIT:
+            break
+
         candles = get_15m_candles(sym)
         if not candles or len(candles) < 30:
             continue
 
-        # EMA для прошлой и текущей свечи
         ema9_prev = calculate_ema(candles[:-1], 9)
         ema21_prev = calculate_ema(candles[:-1], 21)
         ema9_curr = calculate_ema(candles, 9)
@@ -139,7 +157,6 @@ def check_ema_cross():
         if ema9_prev is None or ema21_prev is None or ema9_curr is None or ema21_curr is None:
             continue
 
-        # Условия пересечения
         is_cross_up = ema9_prev <= ema21_prev and ema9_curr > ema21_curr
         is_cross_down = ema9_prev >= ema21_prev and ema9_curr < ema21_curr
 
@@ -150,38 +167,56 @@ def check_ema_cross():
             direction = 'SHORT'
 
         if direction:
-            # Проверяем, не отправляли ли мы такой сигнал раньше
-            if state.get(sym) != direction:
-                current_price = candles[-1]
-                if direction == 'LONG':
-                    stop_loss = current_price * (1 - STOP_LOSS_PCT / 100)
-                    take_profit = current_price * (1 + TAKE_PROFIT_PCT / 100)
-                else:
-                    stop_loss = current_price * (1 + STOP_LOSS_PCT / 100)
-                    take_profit = current_price * (1 - TAKE_PROFIT_PCT / 100)
+            # ФИЛЬТР ЛИКВИДНОСТИ (защита от мусора)
+            ticker = get_ticker(sym)
+            if not ticker:
+                continue
+            if ticker['price'] < 0.0001 or ticker['volume'] < 500000:
+                continue
 
-                msg = f"🏇 РАБОЧАЯ ЛОШАДКА: {direction} {sym}\n"
-                msg += f"Вход: {current_price:.4f}\n"
-                msg += f"Стоп (-{STOP_LOSS_PCT}%): {stop_loss:.4f}\n"
-                msg += f"Тейк (+{TAKE_PROFIT_PCT}%): {take_profit:.4f}"
-                
-                send_telegram(msg)
-                print(f"✅ Сигнал {direction} по {sym} отправлен!")
-                new_state[sym] = direction
+            # ПРОВЕРКА COOLDOWN (4 часа)
+            last_signal = state.get(sym, {}).get('signal')
+            last_time = state.get(sym, {}).get('time', 0)
+            
+            if last_signal == direction and (time.time() - last_time) < (COOLDOWN_HOURS * 3600):
+                continue
+
+            current_price = candles[-1]
+            if direction == 'LONG':
+                stop_loss = current_price * (1 - STOP_LOSS_PCT / 100)
+                take_profit = current_price * (1 + TAKE_PROFIT_PCT / 100)
             else:
-                new_state[sym] = state[sym]
-        else:
-            # Если пересечения нет, сохраняем предыдущее состояние или сбрасываем
-            new_state[sym] = state.get(sym, 'NEUTRAL')
+                stop_loss = current_price * (1 + STOP_LOSS_PCT / 100)
+                take_profit = current_price * (1 - TAKE_PROFIT_PCT / 100)
 
-    save_state(new_state)
+            msg = f"🏇 РАБОЧАЯ ЛОШАДКА: {direction} {sym}\n"
+            msg += f"Вход: {current_price:.4f}\n"
+            msg += f"Стоп (-{STOP_LOSS_PCT}%): {stop_loss:.4f}\n"
+            msg += f"Тейк (+{TAKE_PROFIT_PCT}%): {take_profit:.4f}"
+            
+            send_telegram(msg)
+            print(f"✅ Сигнал {direction} по {sym} отправлен!")
+            
+            # Обновляем состояние
+            new_state[sym] = {'signal': direction, 'time': time.time()}
+            signals_today += 1
+        else:
+            # Если пересечения нет, сохраняем предыдущее состояние
+            if sym in state:
+                new_state[sym] = state[sym]
+
+    # Сохраняем обновленное состояние (включая счетчик сегодняшних сигналов)
+    state['signals_today'] = signals_today
+    for sym, value in new_state.items():
+        state[sym] = value
+    save_state(state)
 
 # ==========================================================
 # ФОНОВЫЙ ПОТОК
 # ==========================================================
 def bg_alarm():
     print("🚀 Фоновый поток запущен!", flush=True)
-    last_check = 0
+    last_check = time.time() # Ждем 15 минут после запуска
     while True:
         try:
             now = time.time()
