@@ -16,7 +16,7 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 MODEL = "deepseek/deepseek-v4-pro"
 
-# Параметры торговли (рабочие)
+# Параметры торговли
 STOP_LOSS_PCT = 1.5   # -1.5% от входа
 TAKE_PROFIT_PCT = 2.0 # +2.0% от входа
 
@@ -44,13 +44,14 @@ SYMBOLS = [
 ]
 
 STATE_FILE = "signal_state.json"
-DAILY_LIMIT = 8
+DAILY_LIMIT = 10
 COOLDOWN_HOURS = 4
+MIN_INTERVAL_HOURS = 2 # Минимальный интервал между любыми новыми сигналами
 
 # ==========================================================
 # КЭШ ДЛЯ НОВОСТЕЙ (ОБНОВЛЕНИЕ КАЖДЫЕ 15 МИНУТ)
 # ==========================================================
-NEWS_CACHE = {"last_update": 0, "headlines": []}
+NEWS_CACHE = {"last_update": 0, "headlines": [], "sentiment": "Не определён"}
 
 RSS_FEEDS = [
     "https://cointelegraph.com/feed",
@@ -75,21 +76,66 @@ def fetch_rss_headlines():
     unique_headlines = list(dict.fromkeys(headlines))[:3]
     return unique_headlines
 
+def analyze_news_sentiment(news_text):
+    """Отправляет новости в нейросеть и получает краткую оценку фона"""
+    if not news_text:
+        return "Новостей нет"
+    
+    prompt = f"""
+Проанализируй следующие новости криптовалютного рынка:
+{news_text}
+
+Дай краткую оценку: позитивный, нейтральный или негативный фон для рынка.
+Ответь строго одним словом: ПОЗИТИВНЫЙ, НЕЙТРАЛЬНЫЙ или НЕГАТИВНЫЙ.
+"""
+
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    data = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 10  # короткий ответ
+    }
+
+    try:
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
+        result = resp.json()
+        if "error" in result:
+            print(f"⚠️ Ошибка нейросети: {result['error']}")
+            return "Не удалось оценить"
+        raw = result['choices'][0]['message']['content'].strip().upper()
+        # Обрезаем лишнее, если нейросеть написала больше одного слова
+        if "ПОЗИТИВ" in raw:
+            return "Позитивный"
+        if "НЕГАТИВ" in raw:
+            return "Негативный"
+        return "Нейтральный"
+    except Exception as e:
+        print(f"❌ Ошибка вызова нейросети: {e}")
+        return "Не удалось оценить"
+
 def update_news_cache():
     global NEWS_CACHE
     now = time.time()
-    # Обновляем новости, только если прошло 15 минут (900 секунд)
+    # Обновляем новости и оценку, только если прошло 15 минут (900 секунд)
     if now - NEWS_CACHE["last_update"] < 900:
-        return NEWS_CACHE["headlines"]
+        return NEWS_CACHE["headlines"], NEWS_CACHE["sentiment"]
     
     print("📰 Сканирую RSS-ленты для свежих новостей...")
     new_headlines = fetch_rss_headlines()
     if new_headlines:
-        NEWS_CACHE = {"last_update": now, "headlines": new_headlines}
+        news_text = "\n".join(new_headlines)
+        print("🧠 Запрашиваю оценку фона у нейросети...")
+        sentiment = analyze_news_sentiment(news_text)
+        NEWS_CACHE = {
+            "last_update": now,
+            "headlines": new_headlines,
+            "sentiment": sentiment
+        }
         print(f"📰 Новости обновлены: {new_headlines}")
+        print(f"🧠 Оценка фона: {sentiment}")
     else:
         print("⚠️ Не удалось получить свежие новости.")
-    return NEWS_CACHE["headlines"]
+    return NEWS_CACHE["headlines"], NEWS_CACHE["sentiment"]
 # ==========================================================
 
 app = Flask(__name__)
@@ -163,13 +209,13 @@ def send_telegram(text):
         pass
 
 # ==========================================================
-# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (С ЛИМИТАМИ И НОВОСТЯМИ)
+# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (РАВНОМЕРНОЕ РАСПРЕДЕЛЕНИЕ)
 # ==========================================================
 def check_ema_cross():
     if not is_working_hours():
         return
 
-    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (с лимитами)...")
+    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (равномерно)...")
 
     state = load_state()
     new_state = {}
@@ -180,12 +226,19 @@ def check_ema_cross():
 
     signals_today = state.get('signals_today', 0)
     if signals_today >= DAILY_LIMIT:
-        print(f"🚫 Дневной лимит сигналов ({DAILY_LIMIT}) достигнут. Сегодня больше не отправляем.")
+        print(f"🚫 Дневной лимит ({DAILY_LIMIT}) достигнут.")
         save_state(state)
         return
 
-    # Обновляем новости перед сканированием
-    headlines = update_news_cache()
+    # Проверка равномерности: ждём 2 часа с момента последнего сигнала
+    last_signal_time = state.get('last_signal_time', 0)
+    if (time.time() - last_signal_time) < (MIN_INTERVAL_HOURS * 3600):
+        print(f"⏳ Прошло меньше {MIN_INTERVAL_HOURS} часов с последнего сигнала. Пропускаю цикл.")
+        save_state(state)
+        return
+
+    # Обновляем новости и получаем оценку фона
+    headlines, sentiment = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in headlines]) if headlines else "Нет свежих новостей."
 
     for sym in SYMBOLS:
@@ -237,13 +290,19 @@ def check_ema_cross():
             msg += f"Вход: {current_price:.4f}\n"
             msg += f"Стоп (-{STOP_LOSS_PCT}%): {stop_loss:.4f}\n"
             msg += f"Тейк (+{TAKE_PROFIT_PCT}%): {take_profit:.4f}\n"
-            msg += f"📰 Новости: \n{news_text}"
+            msg += f"📰 Новости: \n{news_text}\n"
+            msg += f"🧠 Оценка фона: {sentiment}"
 
             send_telegram(msg)
             print(f"✅ Сигнал {direction} по {sym} отправлен!")
 
+            # Обновляем время последнего сигнала и состояние монеты
+            state['last_signal_time'] = time.time()
             new_state[sym] = {'signal': direction, 'time': time.time()}
             signals_today += 1
+
+            # ВАЖНО: чтобы не выдать все сигналы разом, выходим из цикла после первого
+            break
         else:
             if sym in state:
                 new_state[sym] = state[sym]
