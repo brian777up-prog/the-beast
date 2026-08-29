@@ -4,6 +4,7 @@ import datetime
 import time
 import os
 import threading
+import xml.etree.ElementTree as ET
 from flask import Flask
 
 # ==========================================================
@@ -15,6 +16,7 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 MODEL = "deepseek/deepseek-v4-pro"
 
+# Параметры торговли (рабочие)
 STOP_LOSS_PCT = 1.5   # -1.5% от входа
 TAKE_PROFIT_PCT = 2.0 # +2.0% от входа
 
@@ -42,8 +44,52 @@ SYMBOLS = [
 ]
 
 STATE_FILE = "signal_state.json"
-DAILY_LIMIT = 5
+DAILY_LIMIT = 8
 COOLDOWN_HOURS = 4
+
+# ==========================================================
+# КЭШ ДЛЯ НОВОСТЕЙ (ОБНОВЛЕНИЕ КАЖДЫЕ 15 МИНУТ)
+# ==========================================================
+NEWS_CACHE = {"last_update": 0, "headlines": []}
+
+RSS_FEEDS = [
+    "https://cointelegraph.com/feed",
+    "https://www.coindesk.com/feed/",
+    "https://cryptonews.com/news/feed/"
+]
+
+def fetch_rss_headlines():
+    headlines = []
+    for feed_url in RSS_FEEDS:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = requests.get(feed_url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                for item in root.findall('.//item'):
+                    title_elem = item.find('title')
+                    if title_elem is not None and title_elem.text:
+                        headlines.append(title_elem.text.strip())
+        except Exception as e:
+            print(f"⚠️ Ошибка парсинга {feed_url}: {e}")
+    unique_headlines = list(dict.fromkeys(headlines))[:3]
+    return unique_headlines
+
+def update_news_cache():
+    global NEWS_CACHE
+    now = time.time()
+    # Обновляем новости, только если прошло 15 минут (900 секунд)
+    if now - NEWS_CACHE["last_update"] < 900:
+        return NEWS_CACHE["headlines"]
+    
+    print("📰 Сканирую RSS-ленты для свежих новостей...")
+    new_headlines = fetch_rss_headlines()
+    if new_headlines:
+        NEWS_CACHE = {"last_update": now, "headlines": new_headlines}
+        print(f"📰 Новости обновлены: {new_headlines}")
+    else:
+        print("⚠️ Не удалось получить свежие новости.")
+    return NEWS_CACHE["headlines"]
 # ==========================================================
 
 app = Flask(__name__)
@@ -75,7 +121,10 @@ def get_ticker(symbol):
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            return {'price': float(data['lastPrice']), 'volume': float(data['quoteVolume'])}
+            return {
+                'price': float(data['lastPrice']),
+                'volume': float(data['quoteVolume'])
+            }
         return None
     except:
         return None
@@ -114,34 +163,32 @@ def send_telegram(text):
         pass
 
 # ==========================================================
-# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (С ЛИМИТАМИ)
+# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (С ЛИМИТАМИ И НОВОСТЯМИ)
 # ==========================================================
 def check_ema_cross():
     if not is_working_hours():
         return
 
     print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (с лимитами)...")
-    
+
     state = load_state()
     new_state = {}
 
-    # Определяем сегодняшний день (UTC) для дневного лимита
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    
-    # Проверяем дневной лимит
     if state.get('date') != today:
         state = {'date': today}
-    
-    signals_today = state.get('signals_today', 0)
 
-    # Если уже достигнут лимит, выходим
+    signals_today = state.get('signals_today', 0)
     if signals_today >= DAILY_LIMIT:
         print(f"🚫 Дневной лимит сигналов ({DAILY_LIMIT}) достигнут. Сегодня больше не отправляем.")
         save_state(state)
         return
 
+    # Обновляем новости перед сканированием
+    headlines = update_news_cache()
+    news_text = "\n".join([f"- {n}" for n in headlines]) if headlines else "Нет свежих новостей."
+
     for sym in SYMBOLS:
-        # Проверяем, не достигли ли мы лимита внутри цикла
         if signals_today >= DAILY_LIMIT:
             break
 
@@ -167,17 +214,14 @@ def check_ema_cross():
             direction = 'SHORT'
 
         if direction:
-            # ФИЛЬТР ЛИКВИДНОСТИ (защита от мусора)
             ticker = get_ticker(sym)
             if not ticker:
                 continue
             if ticker['price'] < 0.0001 or ticker['volume'] < 500000:
                 continue
 
-            # ПРОВЕРКА COOLDOWN (4 часа)
             last_signal = state.get(sym, {}).get('signal')
             last_time = state.get(sym, {}).get('time', 0)
-            
             if last_signal == direction and (time.time() - last_time) < (COOLDOWN_HOURS * 3600):
                 continue
 
@@ -192,20 +236,18 @@ def check_ema_cross():
             msg = f"🏇 РАБОЧАЯ ЛОШАДКА: {direction} {sym}\n"
             msg += f"Вход: {current_price:.4f}\n"
             msg += f"Стоп (-{STOP_LOSS_PCT}%): {stop_loss:.4f}\n"
-            msg += f"Тейк (+{TAKE_PROFIT_PCT}%): {take_profit:.4f}"
-            
+            msg += f"Тейк (+{TAKE_PROFIT_PCT}%): {take_profit:.4f}\n"
+            msg += f"📰 Новости: \n{news_text}"
+
             send_telegram(msg)
             print(f"✅ Сигнал {direction} по {sym} отправлен!")
-            
-            # Обновляем состояние
+
             new_state[sym] = {'signal': direction, 'time': time.time()}
             signals_today += 1
         else:
-            # Если пересечения нет, сохраняем предыдущее состояние
             if sym in state:
                 new_state[sym] = state[sym]
 
-    # Сохраняем обновленное состояние (включая счетчик сегодняшних сигналов)
     state['signals_today'] = signals_today
     for sym, value in new_state.items():
         state[sym] = value
@@ -216,7 +258,7 @@ def check_ema_cross():
 # ==========================================================
 def bg_alarm():
     print("🚀 Фоновый поток запущен!", flush=True)
-    last_check = time.time() # Ждем 15 минут после запуска
+    last_check = time.time()
     while True:
         try:
             now = time.time()
