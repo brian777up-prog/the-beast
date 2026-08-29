@@ -93,7 +93,7 @@ def analyze_news_sentiment(news_text):
     data = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10  # короткий ответ
+        "max_tokens": 100  # Увеличили с 10 до 100, чтобы модель успела ответить
     }
 
     try:
@@ -102,8 +102,10 @@ def analyze_news_sentiment(news_text):
         if "error" in result:
             print(f"⚠️ Ошибка нейросети: {result['error']}")
             return "Не удалось оценить"
-        raw = result['choices'][0]['message']['content'].strip().upper()
-        # Обрезаем лишнее, если нейросеть написала больше одного слова
+        
+        # Безопасно получаем текст (защита от None)
+        raw = (result['choices'][0]['message']['content'] or "").strip().upper()
+        
         if "ПОЗИТИВ" in raw:
             return "Позитивный"
         if "НЕГАТИВ" in raw:
