@@ -44,7 +44,7 @@ SYMBOLS = [
 ]
 
 STATE_FILE = "signal_state.json"
-DAILY_LIMIT = 10
+DAILY_LIMIT = 14
 COOLDOWN_HOURS = 4
 MIN_INTERVAL_HOURS = 2 # Минимальный интервал между любыми новыми сигналами
 
@@ -93,7 +93,7 @@ def analyze_news_sentiment(news_text):
     data = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 100  # Увеличили с 10 до 100, чтобы модель успела ответить
+        "max_tokens": 100
     }
 
     try:
@@ -103,7 +103,6 @@ def analyze_news_sentiment(news_text):
             print(f"⚠️ Ошибка нейросети: {result['error']}")
             return "Не удалось оценить"
         
-        # Безопасно получаем текст (защита от None)
         raw = (result['choices'][0]['message']['content'] or "").strip().upper()
         
         if "ПОЗИТИВ" in raw:
@@ -118,7 +117,6 @@ def analyze_news_sentiment(news_text):
 def update_news_cache():
     global NEWS_CACHE
     now = time.time()
-    # Обновляем новости и оценку, только если прошло 15 минут (900 секунд)
     if now - NEWS_CACHE["last_update"] < 900:
         return NEWS_CACHE["headlines"], NEWS_CACHE["sentiment"]
     
@@ -211,13 +209,13 @@ def send_telegram(text):
         pass
 
 # ==========================================================
-# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (РАВНОМЕРНОЕ РАСПРЕДЕЛЕНИЕ)
+# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (2 СИГНАЛА ЗА ЦИКЛ)
 # ==========================================================
 def check_ema_cross():
     if not is_working_hours():
         return
 
-    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (равномерно)...")
+    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (2 сигнала за цикл)...")
 
     state = load_state()
     new_state = {}
@@ -243,8 +241,15 @@ def check_ema_cross():
     headlines, sentiment = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in headlines]) if headlines else "Нет свежих новостей."
 
+    # Счётчик сигналов за текущий цикл
+    sent_in_cycle = 0
+
     for sym in SYMBOLS:
         if signals_today >= DAILY_LIMIT:
+            break
+
+        # Если уже отправили 2 сигнала за этот цикл - выходим
+        if sent_in_cycle >= 2:
             break
 
         candles = get_15m_candles(sym)
@@ -302,9 +307,7 @@ def check_ema_cross():
             state['last_signal_time'] = time.time()
             new_state[sym] = {'signal': direction, 'time': time.time()}
             signals_today += 1
-
-            # ВАЖНО: чтобы не выдать все сигналы разом, выходим из цикла после первого
-            break
+            sent_in_cycle += 1
         else:
             if sym in state:
                 new_state[sym] = state[sym]
