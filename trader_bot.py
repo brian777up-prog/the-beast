@@ -31,7 +31,7 @@ SYMBOLS = [
     "MKRUSDT", "CRVUSDT", "ARBUSDT", "OPUSDT", "STXUSDT",
     "ALGOUSDT", "HBARUSDT", "KASUSDT", "ICPUSDT", "VETUSDT",
     "EGLDUSDT", "RUNEUSDT", "ENSUSDT", "LDOUSDT", "QNTUSDT",
-    "HYPEUSDT", "ENAUSDT", "JUPUSDT", "JTOUSDT", "ONDOUSDT",
+    "HYPEUSDT", "JUPUSDT", "JTOUSDT", "ONDOUSDT",
     "TIAUSDT", "PYTHUSDT", "AEVOUSDT", "WIFUSDT", "POPCATUSDT",
     "PENGUUSDT", "PNUTUSDT", "ACTUSDT", "BONKUSDT", "NOTUSDT",
     "DOGSUSDT", "HMSTRUSDT", "CATIUSDT", "PIXELUSDT", "ALTUSDT",
@@ -44,9 +44,9 @@ SYMBOLS = [
 ]
 
 STATE_FILE = "signal_state.json"
-DAILY_LIMIT = 14
+DAILY_LIMIT = 20
 COOLDOWN_HOURS = 4
-MIN_INTERVAL_HOURS = 2 # Минимальный интервал между любыми новыми сигналами
+MIN_INTERVAL_HOURS = 1 # Минимальный интервал между любыми новыми сигналами
 
 # ==========================================================
 # КЭШ ДЛЯ НОВОСТЕЙ (ОБНОВЛЕНИЕ КАЖДЫЕ 15 МИНУТ)
