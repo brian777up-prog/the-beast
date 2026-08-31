@@ -17,8 +17,8 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 MODEL = "deepseek/deepseek-v4-pro"
 
 # Параметры торговли
-STOP_LOSS_PCT = 2.5   # -2.5% от входа
-TAKE_PROFIT_PCT = 5.0 # +5.0% от входа
+STOP_LOSS_PCT = 1.5   # -1.5% от входа
+TAKE_PROFIT_PCT = 2.0 # +2.0% от входа
 
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -31,7 +31,7 @@ SYMBOLS = [
     "MKRUSDT", "CRVUSDT", "ARBUSDT", "OPUSDT", "STXUSDT",
     "ALGOUSDT", "HBARUSDT", "KASUSDT", "ICPUSDT", "VETUSDT",
     "EGLDUSDT", "RUNEUSDT", "ENSUSDT", "LDOUSDT", "QNTUSDT",
-    "HYPEUSDT", "JUPUSDT", "JTOUSDT", "ONDOUSDT",
+    "HYPEUSDT", "ENAUSDT", "JUPUSDT", "JTOUSDT", "ONDOUSDT",
     "TIAUSDT", "PYTHUSDT", "AEVOUSDT", "WIFUSDT", "POPCATUSDT",
     "PENGUUSDT", "PNUTUSDT", "ACTUSDT", "BONKUSDT", "NOTUSDT",
     "DOGSUSDT", "HMSTRUSDT", "CATIUSDT", "PIXELUSDT", "ALTUSDT",
@@ -190,22 +190,6 @@ def get_15m_candles(symbol):
     except:
         return None
 
-# НОВАЯ ФУНКЦИЯ: ПОЛУЧЕНИЕ 1-ЧАСОВЫХ СВЕЧЕЙ ДЛЯ ФИЛЬТРА ТРЕНДА
-def get_1h_candles(symbol):
-    try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            candles = []
-            for candle in data:
-                candles.append(float(candle[4]))
-            return candles
-        return None
-    except:
-        return None
-
 # --- РАСЧЕТ EMA ---
 def calculate_ema(values, period):
     if len(values) < period:
@@ -225,13 +209,13 @@ def send_telegram(text):
         pass
 
 # ==========================================================
-# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (2 СИГНАЛА ЗА ЦИКЛ + ФИЛЬТР 1H)
+# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (2 СИГНАЛА ЗА ЦИКЛ)
 # ==========================================================
 def check_ema_cross():
     if not is_working_hours():
         return
 
-    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (с фильтром 1H)...")
+    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (2 сигнала за цикл)...")
 
     state = load_state()
     new_state = {}
@@ -246,20 +230,25 @@ def check_ema_cross():
         save_state(state)
         return
 
+    # Проверка равномерности: ждём 2 часа с момента последнего сигнала
     last_signal_time = state.get('last_signal_time', 0)
     if (time.time() - last_signal_time) < (MIN_INTERVAL_HOURS * 3600):
         print(f"⏳ Прошло меньше {MIN_INTERVAL_HOURS} часов с последнего сигнала. Пропускаю цикл.")
         save_state(state)
         return
 
+    # Обновляем новости и получаем оценку фона
     headlines, sentiment = update_news_cache()
     news_text = "\n".join([f"- {n}" for n in headlines]) if headlines else "Нет свежих новостей."
 
+    # Счётчик сигналов за текущий цикл
     sent_in_cycle = 0
 
     for sym in SYMBOLS:
         if signals_today >= DAILY_LIMIT:
             break
+
+        # Если уже отправили 2 сигнала за этот цикл - выходим
         if sent_in_cycle >= 2:
             break
 
@@ -285,25 +274,6 @@ def check_ema_cross():
             direction = 'SHORT'
 
         if direction:
-            # ФИЛЬТР 1H: проверяем старший тренд
-            candles_1h = get_1h_candles(sym)
-            if candles_1h and len(candles_1h) >= 30:
-                ema9_1h = calculate_ema(candles_1h, 9)
-                ema21_1h = calculate_ema(candles_1h, 21)
-                
-                # Если сигнал LONG, но на 1H тренд вниз (EMA9 < EMA21) - пропускаем
-                if direction == 'LONG' and ema9_1h < ema21_1h:
-                    print(f"⛔ {sym}: сигнал LONG противоречит тренду 1H. Пропускаю.")
-                    continue
-                # Если сигнал SHORT, но на 1H тренд вверх (EMA9 > EMA21) - пропускаем
-                if direction == 'SHORT' and ema9_1h > ema21_1h:
-                    print(f"⛔ {sym}: сигнал SHORT противоречит тренду 1H. Пропускаю.")
-                    continue
-            else:
-                # Если не удалось получить 1H данные, пропускаем сигнал (безопаснее)
-                print(f"⚠️ {sym}: нет данных 1H. Пропускаю.")
-                continue
-
             ticker = get_ticker(sym)
             if not ticker:
                 continue
@@ -333,6 +303,7 @@ def check_ema_cross():
             send_telegram(msg)
             print(f"✅ Сигнал {direction} по {sym} отправлен!")
 
+            # Обновляем время последнего сигнала и состояние монеты
             state['last_signal_time'] = time.time()
             new_state[sym] = {'signal': direction, 'time': time.time()}
             signals_today += 1
