@@ -44,7 +44,7 @@ SYMBOLS = [
 ]
 
 STATE_FILE = "signal_state.json"
-DAILY_LIMIT = 26
+DAILY_LIMIT = 40
 COOLDOWN_HOURS = 4
 MIN_INTERVAL_HOURS = 0.5 # Минимальный интервал между любыми новыми сигналами
 
@@ -249,7 +249,7 @@ def check_ema_cross():
             break
 
         # Если уже отправили 2 сигнала за этот цикл - выходим
-        if sent_in_cycle >= 2:
+        if sent_in_cycle >= 3:
             break
 
         candles = get_15m_candles(sym)
