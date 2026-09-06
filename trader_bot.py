@@ -44,7 +44,7 @@ SYMBOLS = [
 ]
 
 STATE_FILE = "signal_state.json"
-DAILY_LIMIT = 40
+DAILY_LIMIT = 80
 COOLDOWN_HOURS = 4
 MIN_INTERVAL_HOURS = 0.5 # Минимальный интервал между любыми новыми сигналами
 
