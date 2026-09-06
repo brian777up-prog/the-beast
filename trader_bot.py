@@ -17,8 +17,8 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 MODEL = "deepseek/deepseek-v4-pro"
 
 # Параметры торговли
-STOP_LOSS_PCT = 1.5   # -1.5% от входа
-TAKE_PROFIT_PCT = 2.0 # +2.0% от входа
+STOP_LOSS_PCT = 3.0   # -3.0% от входа
+TAKE_PROFIT_PCT = 3.0 # +3.0% от входа
 
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -177,7 +177,7 @@ def get_ticker(symbol):
 
 def get_15m_candles(symbol):
     try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=15m&limit=50"
+        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=30m&limit=50"
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -209,13 +209,13 @@ def send_telegram(text):
         pass
 
 # ==========================================================
-# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (2 СИГНАЛА ЗА ЦИКЛ)
+# СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (3 СИГНАЛА ЗА ЦИКЛ)
 # ==========================================================
 def check_ema_cross():
     if not is_working_hours():
         return
 
-    print("🏇 Сканер (15 мин): ищу пересечение EMA9/EMA21 (2 сигнала за цикл)...")
+    print("🏇 Сканер (30 мин): ищу пересечение EMA9/EMA21 (3 сигнала за цикл)...")
 
     state = load_state()
     new_state = {}
@@ -230,7 +230,7 @@ def check_ema_cross():
         save_state(state)
         return
 
-    # Проверка равномерности: ждём 2 часа с момента последнего сигнала
+    # Проверка равномерности: ждём 30 минут с момента последнего сигнала
     last_signal_time = state.get('last_signal_time', 0)
     if (time.time() - last_signal_time) < (MIN_INTERVAL_HOURS * 3600):
         print(f"⏳ Прошло меньше {MIN_INTERVAL_HOURS} часов с последнего сигнала. Пропускаю цикл.")
@@ -248,7 +248,7 @@ def check_ema_cross():
         if signals_today >= DAILY_LIMIT:
             break
 
-        # Если уже отправили 2 сигнала за этот цикл - выходим
+        # Если уже отправили 3 сигнала за этот цикл - выходим
         if sent_in_cycle >= 3:
             break
 
@@ -326,7 +326,7 @@ def bg_alarm():
     while True:
         try:
             now = time.time()
-            if now - last_check >= 900:
+            if now - last_check >= 1800:
                 check_ema_cross()
                 last_check = now
             time.sleep(30)
