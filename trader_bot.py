@@ -215,7 +215,7 @@ def check_ema_cross():
     if not is_working_hours():
         return
 
-    print("🏇 Сканер (30 мин): ищу пересечение EMA9/EMA21 (3 сигнала за цикл)...")
+    print("🏇 Сканер (1 час): ищу пересечение EMA9/EMA21 (3 сигнала за цикл)...")
 
     state = load_state()
     new_state = {}
@@ -230,7 +230,7 @@ def check_ema_cross():
         save_state(state)
         return
 
-    # Проверка равномерности: ждём 30 минут с момента последнего сигнала
+    # Проверка равномерности: ждём 1 час с момента последнего сигнала
     last_signal_time = state.get('last_signal_time', 0)
     if (time.time() - last_signal_time) < (MIN_INTERVAL_HOURS * 3600):
         print(f"⏳ Прошло меньше {MIN_INTERVAL_HOURS} часов с последнего сигнала. Пропускаю цикл.")
