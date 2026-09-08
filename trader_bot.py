@@ -46,7 +46,7 @@ SYMBOLS = [
 STATE_FILE = "signal_state.json"
 DAILY_LIMIT = 80
 COOLDOWN_HOURS = 4
-MIN_INTERVAL_HOURS = 0.5 # Минимальный интервал между любыми новыми сигналами
+MIN_INTERVAL_HOURS = 1 # Минимальный интервал между любыми новыми сигналами
 
 # ==========================================================
 # КЭШ ДЛЯ НОВОСТЕЙ (ОБНОВЛЕНИЕ КАЖДЫЕ 15 МИНУТ)
@@ -175,9 +175,9 @@ def get_ticker(symbol):
     except:
         return None
 
-def get_15m_candles(symbol):
+def get_1h_candles(symbol):
     try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=30m&limit=50"
+        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -326,7 +326,7 @@ def bg_alarm():
     while True:
         try:
             now = time.time()
-            if now - last_check >= 1800:
+            if now - last_check >= 3600:
                 check_ema_cross()
                 last_check = now
             time.sleep(30)
