@@ -124,8 +124,8 @@ def update_news_cache():
     new_headlines = fetch_rss_headlines()
     if new_headlines:
         news_text = "\n".join(new_headlines)
-        print("🧠 Запрашиваю оценку фона у нейросети...")
-        sentiment = analyze_news_sentiment(news_text)
+        # Нейросеть отключена (закомментирована)
+        sentiment = "Нейтральный"
         NEWS_CACHE = {
             "last_update": now,
             "headlines": new_headlines,
