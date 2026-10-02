@@ -18,7 +18,7 @@ MODEL = "deepseek/deepseek-v4-pro"
 
 # Параметры торговли
 STOP_LOSS_PCT = 3.0   # -3.0% от входа
-TAKE_PROFIT_PCT = 6.0 # +6.0% от входа
+TAKE_PROFIT_PCT = 4.0 # +4.0% от входа
 
 # Фильтры
 MIN_ADX = 15          # Смягченный ADX (боковик отсекается)
