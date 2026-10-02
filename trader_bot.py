@@ -294,7 +294,7 @@ def check_ema_cross():
             continue
 
         # --- ФИЛЬТР СТАРШЕГО ТАЙМФРЕЙМА (1H) ---
-        candles_1h = get_candles(sym, '1h', 60)
+        candles_1h = get_candles(sym, '60m', 60)
         if not candles_1h or len(candles_1h) < EMA_1H_PERIOD:
             continue
         ema50_1h = calculate_ema(candles_1h, EMA_1H_PERIOD)
