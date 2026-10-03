@@ -222,6 +222,18 @@ def send_telegram(text):
 # ==========================================================
 # СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (30m + 1H фильтр)
 # ==========================================================
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_state(data):
+    with open(STATE_FILE, 'w') as f:
+        json.dump(data, f)
 def is_working_hours():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     hour_ekb = (now_utc.hour + 5) % 24
