@@ -222,6 +222,10 @@ def send_telegram(text):
 # ==========================================================
 # СТРАТЕГИЯ "РАБОЧАЯ ЛОШАДКА" (30m + 1H фильтр)
 # ==========================================================
+def is_working_hours():
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    hour_ekb = (now_utc.hour + 5) % 24
+    return (hour_ekb >= 14) or (hour_ekb < 3)
 def check_ema_cross():
     if not is_working_hours():
         return
